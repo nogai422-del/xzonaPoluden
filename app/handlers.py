@@ -16,6 +16,7 @@ from .housekeeping import temp_answer
 from .db import Database, MarketOrder as DbMarketOrder, MarketOrderItem, StorageItem
 from .keyboards import (
     admin_menu,
+    group_role_request_review_keyboard,
     confirm_add_keyboard,
     delete_confirm_keyboard,
     item_keyboard,
@@ -158,6 +159,32 @@ class NickSyncOutcome:
     error: str | None = None
     notice: str | None = None
     request_id: int | None = None
+
+
+async def publish_role_request_card(bot: Bot, db: Database, request_id: int) -> None:
+    req = await db.get_role_request(request_id)
+    if not req or req.status != "pending":
+        return
+    # Repeated edits/imports must not create duplicate approval cards.
+    if req.notification_chat_id and req.notification_message_id:
+        return
+    topic = await db.get_nicks_topic()
+    if not topic:
+        return
+    text = (
+        f"<b>🎖 Новая заявка на должность #{req.id}</b>\n\n"
+        f"👤 Игрок: <a href=\"tg://user?id={req.telegram_id}\"><b>{escape(req.player_nickname)}</b></a>\n"
+        f"Запрошено: <b>{escape(req.requested_label)}</b>\n\n"
+        "Лидер или Заместитель может принять решение прямо здесь:"
+    )
+    try:
+        sent = await bot.send_message(
+            topic[0], text, message_thread_id=topic[1],
+            reply_markup=group_role_request_review_keyboard(req.id),
+        )
+        await db.set_role_request_notification(req.id, sent.chat.id, topic[1], sent.message_id)
+    except Exception:
+        pass
 
 
 async def available_position_lines_for_user(db: Database, user_id: int) -> list[str]:
@@ -375,7 +402,9 @@ async def sync_edited_nickname(message: Message, db: Database):
     if outcome.handled and outcome.error:
         await temp_answer(message, f"⚠️ {outcome.error}", ttl=90)
     elif outcome.handled and outcome.notice:
-        await temp_answer(message, outcome.notice, ttl=45)
+        await temp_answer(message, outcome.notice, ttl=120)
+        if outcome.request_id:
+            await publish_role_request_card(message.bot, db, outcome.request_id)
 
 
 # ---------------------------------------------------------------------------
@@ -715,19 +744,28 @@ async def telethon_sync_nicks(callback: CallbackQuery, db: Database, config: Con
         await callback.answer("Сначала подключите Telethon.", show_alert=True)
         return
     await callback.answer("Импорт запущен")
-    progress = await callback.message.answer("⏳ Читаю старую историю темы «Ники игроков»…")
+    progress = await temp_answer(callback.message, "⏳ Читаю старую историю темы «Ники игроков»…", ttl=300)
     try:
         result = await telethon.sync_nicks_history()
     except Exception as exc:
         await progress.edit_text(f"❌ Ошибка импорта: <code>{escape(str(exc)[:700])}</code>")
         return
+    pending = await db.list_pending_role_requests(limit=200)
+    for req in pending:
+        await publish_role_request_card(callback.bot, db, req.id)
+    try:
+        from .multitask_handlers import announce_topic
+        await announce_topic(callback.bot, db, "nicks", force=True)
+    except Exception:
+        pass
     await progress.edit_text(
         "✅ <b>Импорт старых ников завершён</b>\n\n"
         f"Сообщений просмотрено: <b>{result.scanned}</b>\n"
         f"Игроков найдено: <b>{result.found}</b>\n"
         f"Добавлено/обновлено: <b>{result.imported}</b>\n"
         f"Конфликтов: <b>{result.conflicts}</b>\n"
-        f"Пропущено: <b>{result.invalid}</b>"
+        f"Пропущено: <b>{result.invalid}</b>\n"
+        f"Заявок на должность: <b>{len(pending)}</b>"
     )
 
 
@@ -1360,7 +1398,9 @@ async def fallback(message: Message, db: Database, config: Config):
         if outcome.error:
             await temp_answer(message, f"⚠️ {outcome.error}", ttl=90)
         elif outcome.notice:
-            await temp_answer(message, outcome.notice, ttl=45)
+            await temp_answer(message, outcome.notice, ttl=120)
+            if outcome.request_id:
+                await publish_role_request_card(message.bot, db, outcome.request_id)
         return
     if message.chat.type == "private":
         await message.answer("Рабочее управление выполняется внутри тематических разделов игровой группы. Для справки используйте /help.")

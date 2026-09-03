@@ -57,6 +57,9 @@ class RoleRequest:
     requested_at: str
     reviewed_by: int | None
     reviewed_at: str | None
+    notification_chat_id: int | None = None
+    notification_thread_id: int | None = None
+    notification_message_id: int | None = None
 
 
 class RoleCapacityFullError(RuntimeError):
@@ -175,6 +178,9 @@ class Database:
                     requested_at TEXT NOT NULL,
                     reviewed_by INTEGER,
                     reviewed_at TEXT,
+                    notification_chat_id INTEGER,
+                    notification_thread_id INTEGER,
+                    notification_message_id INTEGER,
                     FOREIGN KEY(telegram_id) REFERENCES players(telegram_id) ON DELETE CASCADE
                 );
                 CREATE INDEX IF NOT EXISTS idx_role_requests_status ON role_requests(status, id DESC);
@@ -216,6 +222,17 @@ class Database:
             ]
             for column, sql in player_migrations:
                 if column not in player_columns:
+                    await db.execute(sql)
+
+            cur = await db.execute("PRAGMA table_info(role_requests)")
+            role_request_columns = {row[1] for row in await cur.fetchall()}
+            role_request_migrations = [
+                ("notification_chat_id", "ALTER TABLE role_requests ADD COLUMN notification_chat_id INTEGER"),
+                ("notification_thread_id", "ALTER TABLE role_requests ADD COLUMN notification_thread_id INTEGER"),
+                ("notification_message_id", "ALTER TABLE role_requests ADD COLUMN notification_message_id INTEGER"),
+            ]
+            for column, sql in role_request_migrations:
+                if column not in role_request_columns:
                     await db.execute(sql)
 
             cur = await db.execute("PRAGMA table_info(market_orders)")
@@ -706,6 +723,16 @@ class Database:
             await db.commit()
             return int(cur.lastrowid)
 
+    async def set_role_request_notification(self, request_id: int, chat_id: int, thread_id: int | None, message_id: int) -> None:
+        async with aiosqlite.connect(self.path) as db:
+            await db.execute(
+                """UPDATE role_requests
+                   SET notification_chat_id=?, notification_thread_id=?, notification_message_id=?
+                   WHERE id=?""",
+                (chat_id, thread_id, message_id, request_id),
+            )
+            await db.commit()
+
     async def get_role_request(self, request_id: int) -> RoleRequest | None:
         async with aiosqlite.connect(self.path) as db:
             db.row_factory = aiosqlite.Row
@@ -713,7 +740,8 @@ class Database:
                 """
                 SELECT r.id, r.telegram_id, p.game_nickname AS player_nickname,
                        r.requested_position_code, r.requested_faction_code, r.requested_label,
-                       r.status, r.requested_at, r.reviewed_by, r.reviewed_at
+                       r.status, r.requested_at, r.reviewed_by, r.reviewed_at,
+                       r.notification_chat_id, r.notification_thread_id, r.notification_message_id
                 FROM role_requests r
                 JOIN players p ON p.telegram_id=r.telegram_id
                 WHERE r.id=?
@@ -730,7 +758,8 @@ class Database:
                 """
                 SELECT r.id, r.telegram_id, p.game_nickname AS player_nickname,
                        r.requested_position_code, r.requested_faction_code, r.requested_label,
-                       r.status, r.requested_at, r.reviewed_by, r.reviewed_at
+                       r.status, r.requested_at, r.reviewed_by, r.reviewed_at,
+                       r.notification_chat_id, r.notification_thread_id, r.notification_message_id
                 FROM role_requests r
                 JOIN players p ON p.telegram_id=r.telegram_id
                 WHERE r.telegram_id=? AND r.status='pending'
@@ -748,7 +777,8 @@ class Database:
                 """
                 SELECT r.id, r.telegram_id, p.game_nickname AS player_nickname,
                        r.requested_position_code, r.requested_faction_code, r.requested_label,
-                       r.status, r.requested_at, r.reviewed_by, r.reviewed_at
+                       r.status, r.requested_at, r.reviewed_by, r.reviewed_at,
+                       r.notification_chat_id, r.notification_thread_id, r.notification_message_id
                 FROM role_requests r
                 JOIN players p ON p.telegram_id=r.telegram_id
                 WHERE r.status='pending'

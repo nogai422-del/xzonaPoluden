@@ -42,9 +42,11 @@ from .roles import FACTIONS, INTERNAL_POSITION_ORDER, POSITIONS, ROLE_CAPACITIES
 from .states import GroupAddItem, GroupMarketOrder, GroupMarketSettings, GroupRoleAdmin
 from .telethon_manager import TelethonManager
 from .telethon_web import TelethonWebAuth
+from .housekeeping import temp_answer, temp_callback_message, temp_bot_message, delete_incoming_later, schedule_delete
 
 router = Router(name="group_first")
 GROUP_TYPES = {"group", "supergroup"}
+ADMIN_CHAT_TYPES = {"group", "supergroup", "private"}
 
 
 def is_admin(user_id: int, config: Config) -> bool:
@@ -97,6 +99,60 @@ def capacity_full_text(position_code: str) -> str:
     if capacity == 1:
         return f"Должность «{label}» уже занята."
     return f"Все места должности «{label}» уже заняты ({capacity}/{capacity})."
+
+
+def user_mention(user_id: int, label: str) -> str:
+    return f'<a href="tg://user?id={int(user_id)}">{escape(label)}</a>'
+
+
+async def notify_role_result(
+    bot: Bot, db: Database, *, user_id: int, nickname: str, label: str | None,
+    actor_id: int | None = None, action: str = "assigned", ttl: int = 1800,
+) -> None:
+    """Notify in the Nicks topic even when Telegram forbids bot DMs.
+
+    The topic notice is transient to avoid clutter, while a private copy is attempted
+    when the player has previously opened the bot.
+    """
+    topic = await db.get_nicks_topic()
+    if action == "assigned":
+        text = f"✅ {user_mention(user_id, nickname)}, вам назначена должность: <b>{escape(label or '—')}</b>."
+        private_text = f"✅ Вам назначена должность: <b>{escape(label or '—')}</b>."
+    elif action == "approved":
+        text = f"✅ {user_mention(user_id, nickname)}, Лидер/Заместитель подтвердил вашу должность: <b>{escape(label or '—')}</b>."
+        private_text = f"✅ Ваша должность подтверждена: <b>{escape(label or '—')}</b>."
+    elif action == "rejected":
+        text = f"❌ {user_mention(user_id, nickname)}, заявка на должность <b>{escape(label or '—')}</b> отклонена руководством."
+        private_text = f"❌ Запрос на должность <b>{escape(label or '—')}</b> отклонён руководством."
+    else:
+        text = f"ℹ️ {user_mention(user_id, nickname)}, ваша должность снята руководством."
+        private_text = "ℹ️ Ваша должность снята руководством."
+    if actor_id:
+        text += f"\nРешение: {user_mention(actor_id, 'руководство')}."
+    if topic:
+        try:
+            await temp_bot_message(bot, topic[0], text, ttl=ttl, message_thread_id=topic[1])
+        except Exception:
+            pass
+    try:
+        await bot.send_message(user_id, private_text)
+    except Exception:
+        pass
+
+
+async def finalize_role_request_topic_card(bot: Bot, req: RoleRequest, text: str) -> None:
+    if not req.notification_chat_id or not req.notification_message_id:
+        return
+    try:
+        await bot.edit_message_text(
+            chat_id=req.notification_chat_id,
+            message_id=req.notification_message_id,
+            text=text,
+            reply_markup=None,
+        )
+        schedule_delete(bot, req.notification_chat_id, req.notification_message_id, 180)
+    except Exception:
+        pass
 
 
 async def refresh_nicks_announcement(bot: Bot, db: Database) -> None:
@@ -526,15 +582,15 @@ async def set_role_command(message: Message, db: Database, config: Config, bot: 
     await db.audit(message.from_user.id, "role.set", f"user={source.from_user.id} role={position_code} faction={faction_code or '-'}")
     await refresh_nicks_announcement(bot, db)
     await temp_answer(message, f"✅ <b>{escape(player.game_nickname)}</b> назначен: <b>{escape(label)}</b>.", ttl=60)
-    try:
-        await bot.send_message(source.from_user.id, f"✅ Вам назначена должность: <b>{escape(label)}</b>.")
-    except Exception:
-        pass
+    await notify_role_result(
+        bot, db, user_id=source.from_user.id, nickname=player.game_nickname, label=label,
+        actor_id=message.from_user.id, action="assigned"
+    )
     await delete_incoming_later(message)
 
 
 @router.message(Command("clear_role"), F.chat.type.in_(GROUP_TYPES))
-async def clear_role_command(message: Message, db: Database, config: Config):
+async def clear_role_command(message: Message, db: Database, config: Config, bot: Bot):
     if not message.from_user or not await can_manage_roles(message.from_user.id, db, config):
         await temp_answer(message, "Недостаточно прав.", ttl=45)
         return
@@ -550,20 +606,25 @@ async def clear_role_command(message: Message, db: Database, config: Config):
     await db.audit(message.from_user.id, "role.clear", f"user={source.from_user.id}")
     await refresh_nicks_announcement(message.bot, db)
     await temp_answer(message, f"✅ Должность <b>{escape(player.game_nickname)}</b> снята.", ttl=60)
+    await notify_role_result(
+        bot, db, user_id=source.from_user.id, nickname=player.game_nickname, label=None,
+        actor_id=message.from_user.id, action="cleared"
+    )
     await delete_incoming_later(message)
 
 
-@router.message(Command("admin"), F.chat.type.in_(GROUP_TYPES))
+@router.message(Command("admin"), F.chat.type.in_(ADMIN_CHAT_TYPES))
 async def group_admin(message: Message, db: Database, config: Config, telethon: TelethonManager):
     if not message.from_user or not await can_manage_roles(message.from_user.id, db, config):
         await temp_answer(message, "Недостаточно прав.", ttl=45)
         return
-    await db.set_setting("primary_chat_id", str(message.chat.id))
+    if message.chat.type in GROUP_TYPES:
+        await db.set_setting("primary_chat_id", str(message.chat.id))
     await temp_answer(message, await group_admin_text(db, telethon), reply_markup=group_admin_menu(), ttl=900)
     await delete_incoming_later(message)
 
 
-@router.callback_query(F.data == "gadmin:home", F.message.chat.type.in_(GROUP_TYPES))
+@router.callback_query(F.data == "gadmin:home", F.message.chat.type.in_(ADMIN_CHAT_TYPES))
 async def group_admin_home(callback: CallbackQuery, db: Database, config: Config, telethon: TelethonManager):
     if not await can_manage_roles(callback.from_user.id, db, config):
         await callback.answer("Недостаточно прав", show_alert=True)
@@ -572,7 +633,7 @@ async def group_admin_home(callback: CallbackQuery, db: Database, config: Config
     await callback.answer()
 
 
-@router.callback_query(F.data == "gadmin:storage", F.message.chat.type.in_(GROUP_TYPES))
+@router.callback_query(F.data == "gadmin:storage", F.message.chat.type.in_(ADMIN_CHAT_TYPES))
 async def group_admin_storage(callback: CallbackQuery, db: Database, config: Config):
     if not await can_manage_roles(callback.from_user.id, db, config):
         await callback.answer("Недостаточно прав", show_alert=True)
@@ -589,7 +650,7 @@ async def group_admin_storage(callback: CallbackQuery, db: Database, config: Con
     await callback.answer()
 
 
-@router.callback_query(F.data == "gadmin:nicks", F.message.chat.type.in_(GROUP_TYPES))
+@router.callback_query(F.data == "gadmin:nicks", F.message.chat.type.in_(ADMIN_CHAT_TYPES))
 async def group_admin_nicks(callback: CallbackQuery, db: Database, config: Config, bot: Bot, telethon: TelethonManager):
     if not await can_manage_roles(callback.from_user.id, db, config):
         await callback.answer("Недостаточно прав", show_alert=True)
@@ -621,7 +682,7 @@ async def group_admin_nicks(callback: CallbackQuery, db: Database, config: Confi
     await callback.answer()
 
 
-@router.callback_query(F.data == "gadmin:roles", F.message.chat.type.in_(GROUP_TYPES))
+@router.callback_query(F.data == "gadmin:roles", F.message.chat.type.in_(ADMIN_CHAT_TYPES))
 async def group_admin_roles(callback: CallbackQuery, db: Database, config: Config, state: FSMContext):
     await state.clear()
     if not await can_manage_roles(callback.from_user.id, db, config):
@@ -635,7 +696,7 @@ async def group_admin_roles(callback: CallbackQuery, db: Database, config: Confi
     await callback.answer()
 
 
-@router.callback_query(F.data == "grole:requests", F.message.chat.type.in_(GROUP_TYPES))
+@router.callback_query(F.data == "grole:requests", F.message.chat.type.in_(ADMIN_CHAT_TYPES))
 async def group_role_requests(callback: CallbackQuery, db: Database, config: Config):
     if not await can_manage_roles(callback.from_user.id, db, config):
         await callback.answer("Недостаточно прав", show_alert=True)
@@ -649,7 +710,7 @@ async def group_role_requests(callback: CallbackQuery, db: Database, config: Con
     await callback.answer()
 
 
-@router.callback_query(F.data.regexp(r"^grole:(unassigned|all):\d+$"), F.message.chat.type.in_(GROUP_TYPES))
+@router.callback_query(F.data.regexp(r"^grole:(unassigned|all):\d+$"), F.message.chat.type.in_(ADMIN_CHAT_TYPES))
 async def group_role_players_list(callback: CallbackQuery, db: Database, config: Config):
     if not await can_manage_roles(callback.from_user.id, db, config):
         await callback.answer("Недостаточно прав", show_alert=True)
@@ -673,7 +734,7 @@ async def group_role_players_list(callback: CallbackQuery, db: Database, config:
     await callback.answer()
 
 
-@router.callback_query(F.data.startswith("grole:player:"), F.message.chat.type.in_(GROUP_TYPES))
+@router.callback_query(F.data.startswith("grole:player:"), F.message.chat.type.in_(ADMIN_CHAT_TYPES))
 async def group_role_player_view(callback: CallbackQuery, db: Database, config: Config):
     if not await can_manage_roles(callback.from_user.id, db, config):
         await callback.answer("Недостаточно прав", show_alert=True)
@@ -685,7 +746,7 @@ async def group_role_player_view(callback: CallbackQuery, db: Database, config: 
     await callback.answer()
 
 
-@router.callback_query(F.data.regexp(r"^grole:set:\d+:[a-z_]+$"), F.message.chat.type.in_(GROUP_TYPES))
+@router.callback_query(F.data.regexp(r"^grole:set:\d+:[a-z_]+$"), F.message.chat.type.in_(ADMIN_CHAT_TYPES))
 async def group_role_set_direct(callback: CallbackQuery, db: Database, config: Config, bot: Bot):
     if not await can_manage_roles(callback.from_user.id, db, config):
         await callback.answer("Недостаточно прав", show_alert=True)
@@ -707,15 +768,15 @@ async def group_role_set_direct(callback: CallbackQuery, db: Database, config: C
     label = position_display(position_code)
     await db.audit(callback.from_user.id, "role.set", f"user={user_id} role={position_code}")
     await refresh_nicks_announcement(bot, db)
-    try:
-        await bot.send_message(user_id, f"✅ Вам назначена должность: <b>{escape(label)}</b>.")
-    except Exception:
-        pass
+    await notify_role_result(
+        bot, db, user_id=user_id, nickname=player.game_nickname, label=label,
+        actor_id=callback.from_user.id, action="assigned"
+    )
     await render_role_player_message(callback.message, user_id, db)
     await callback.answer(f"Назначено: {label}")
 
 
-@router.callback_query(F.data.startswith("grole:clear:"), F.message.chat.type.in_(GROUP_TYPES))
+@router.callback_query(F.data.startswith("grole:clear:"), F.message.chat.type.in_(ADMIN_CHAT_TYPES))
 async def group_role_clear_direct(callback: CallbackQuery, db: Database, config: Config, bot: Bot):
     if not await can_manage_roles(callback.from_user.id, db, config):
         await callback.answer("Недостаточно прав", show_alert=True)
@@ -728,11 +789,15 @@ async def group_role_clear_direct(callback: CallbackQuery, db: Database, config:
     await db.clear_player_role(user_id, callback.from_user.id)
     await db.audit(callback.from_user.id, "role.clear", f"user={user_id}")
     await refresh_nicks_announcement(bot, db)
+    await notify_role_result(
+        bot, db, user_id=user_id, nickname=player.game_nickname, label=None,
+        actor_id=callback.from_user.id, action="cleared"
+    )
     await render_role_player_message(callback.message, user_id, db)
     await callback.answer("Должность снята")
 
 
-@router.callback_query(F.data.startswith("grole:ext:"), F.message.chat.type.in_(GROUP_TYPES))
+@router.callback_query(F.data.startswith("grole:ext:"), F.message.chat.type.in_(ADMIN_CHAT_TYPES))
 async def group_role_external_factions(callback: CallbackQuery, db: Database, config: Config):
     if not await can_manage_roles(callback.from_user.id, db, config):
         await callback.answer("Недостаточно прав", show_alert=True)
@@ -749,7 +814,7 @@ async def group_role_external_factions(callback: CallbackQuery, db: Database, co
     await callback.answer()
 
 
-@router.callback_query(F.data.regexp(r"^grole:extf:\d+:[a-z_]+$"), F.message.chat.type.in_(GROUP_TYPES))
+@router.callback_query(F.data.regexp(r"^grole:extf:\d+:[a-z_]+$"), F.message.chat.type.in_(ADMIN_CHAT_TYPES))
 async def group_role_external_choose(callback: CallbackQuery, db: Database, config: Config):
     if not await can_manage_roles(callback.from_user.id, db, config):
         await callback.answer("Недостаточно прав", show_alert=True)
@@ -770,7 +835,7 @@ async def group_role_external_choose(callback: CallbackQuery, db: Database, conf
     await callback.answer()
 
 
-@router.callback_query(F.data.regexp(r"^grole:setext:\d+:external_(leader|deputy):[a-z_]+$"), F.message.chat.type.in_(GROUP_TYPES))
+@router.callback_query(F.data.regexp(r"^grole:setext:\d+:external_(leader|deputy):[a-z_]+$"), F.message.chat.type.in_(ADMIN_CHAT_TYPES))
 async def group_role_external_set(callback: CallbackQuery, db: Database, config: Config, bot: Bot):
     if not await can_manage_roles(callback.from_user.id, db, config):
         await callback.answer("Недостаточно прав", show_alert=True)
@@ -788,15 +853,15 @@ async def group_role_external_set(callback: CallbackQuery, db: Database, config:
     label = position_display(position_code, faction_code)
     await db.audit(callback.from_user.id, "role.set", f"user={user_id} role={position_code} faction={faction_code}")
     await refresh_nicks_announcement(bot, db)
-    try:
-        await bot.send_message(user_id, f"✅ Вам назначена должность: <b>{escape(label)}</b>.")
-    except Exception:
-        pass
+    await notify_role_result(
+        bot, db, user_id=user_id, nickname=player.game_nickname, label=label,
+        actor_id=callback.from_user.id, action="assigned"
+    )
     await render_role_player_message(callback.message, user_id, db)
     await callback.answer(f"Назначено: {label}")
 
 
-@router.callback_query(F.data == "grole:search", F.message.chat.type.in_(GROUP_TYPES))
+@router.callback_query(F.data == "grole:search", F.message.chat.type.in_(ADMIN_CHAT_TYPES))
 async def group_role_search_start(callback: CallbackQuery, db: Database, config: Config, state: FSMContext):
     if not await can_manage_roles(callback.from_user.id, db, config):
         await callback.answer("Недостаточно прав", show_alert=True)
@@ -809,7 +874,7 @@ async def group_role_search_start(callback: CallbackQuery, db: Database, config:
     await callback.answer()
 
 
-@router.message(GroupRoleAdmin.search, F.chat.type.in_(GROUP_TYPES))
+@router.message(GroupRoleAdmin.search, F.chat.type.in_(ADMIN_CHAT_TYPES))
 async def group_role_search_input(message: Message, db: Database, config: Config, state: FSMContext):
     if not message.from_user or not await can_manage_roles(message.from_user.id, db, config):
         await state.clear()
@@ -827,7 +892,7 @@ async def group_role_search_input(message: Message, db: Database, config: Config
     await temp_answer(message, text, reply_markup=group_role_search_results_keyboard(players), ttl=900)
 
 
-@router.callback_query(F.data.startswith("grole:view:"), F.message.chat.type.in_(GROUP_TYPES))
+@router.callback_query(F.data.startswith("grole:view:"), F.message.chat.type.in_(ADMIN_CHAT_TYPES))
 async def group_role_request_view(callback: CallbackQuery, db: Database, config: Config):
     if not await can_manage_roles(callback.from_user.id, db, config):
         await callback.answer("Недостаточно прав", show_alert=True)
@@ -853,7 +918,7 @@ async def group_role_request_view(callback: CallbackQuery, db: Database, config:
     await callback.answer()
 
 
-@router.callback_query(F.data.regexp(r"^grole:(approve|reject):\d+$"), F.message.chat.type.in_(GROUP_TYPES))
+@router.callback_query(F.data.regexp(r"^grole:(approve|reject):\d+$"), F.message.chat.type.in_(ADMIN_CHAT_TYPES))
 async def group_role_request_review(callback: CallbackQuery, db: Database, config: Config, bot: Bot):
     if not await can_manage_roles(callback.from_user.id, db, config):
         await callback.answer("Недостаточно прав", show_alert=True)
@@ -869,33 +934,35 @@ async def group_role_request_review(callback: CallbackQuery, db: Database, confi
         return
     if action == "approve":
         result = f"✅ Подтверждено: <b>{escape(req.player_nickname)}</b> — <b>{escape(req.requested_label)}</b>."
-        try:
-            await bot.send_message(
-                req.telegram_id,
-                f"✅ Ваша должность подтверждена: <b>{escape(req.requested_label)}</b>."
-            )
-        except Exception:
-            pass
+        await notify_role_result(
+            bot, db, user_id=req.telegram_id, nickname=req.player_nickname, label=req.requested_label,
+            actor_id=callback.from_user.id, action="approved"
+        )
     else:
         result = f"❌ Запрос <b>{escape(req.player_nickname)}</b> на должность <b>{escape(req.requested_label)}</b> отклонён."
-        try:
-            await bot.send_message(
-                req.telegram_id,
-                f"❌ Запрос на должность <b>{escape(req.requested_label)}</b> отклонён руководством."
-            )
-        except Exception:
-            pass
+        await notify_role_result(
+            bot, db, user_id=req.telegram_id, nickname=req.player_nickname, label=req.requested_label,
+            actor_id=callback.from_user.id, action="rejected"
+        )
+    is_topic_request_card = bool(
+        req.notification_chat_id
+        and req.notification_message_id
+        and callback.message.chat.id == req.notification_chat_id
+        and callback.message.message_id == req.notification_message_id
+    )
+    await finalize_role_request_topic_card(bot, req, result)
     if action == "approve":
         await db.audit(callback.from_user.id, "role.approve", f"request={req.id} user={req.telegram_id} role={req.requested_position_code}")
         await refresh_nicks_announcement(bot, db)
     else:
         await db.audit(callback.from_user.id, "role.reject", f"request={req.id} user={req.telegram_id} role={req.requested_position_code}")
-    requests = await db.list_pending_role_requests(limit=20)
-    await callback.message.edit_text(result, reply_markup=group_role_requests_keyboard(requests))
+    if not is_topic_request_card:
+        requests = await db.list_pending_role_requests(limit=20)
+        await callback.message.edit_text(result, reply_markup=group_role_requests_keyboard(requests))
     await callback.answer("Готово")
 
 
-@router.callback_query(F.data == "gadmin:telethon", F.message.chat.type.in_(GROUP_TYPES))
+@router.callback_query(F.data == "gadmin:telethon", F.message.chat.type.in_(ADMIN_CHAT_TYPES))
 async def group_admin_telethon(callback: CallbackQuery, db: Database, config: Config, bot: Bot, telethon: TelethonManager):
     if not await can_manage_roles(callback.from_user.id, db, config):
         await callback.answer("Недостаточно прав", show_alert=True)
@@ -922,7 +989,7 @@ async def group_admin_telethon(callback: CallbackQuery, db: Database, config: Co
     await callback.answer()
 
 
-@router.callback_query(F.data == "gtelethon:web_auth", F.message.chat.type.in_(GROUP_TYPES))
+@router.callback_query(F.data == "gtelethon:web_auth", F.message.chat.type.in_(ADMIN_CHAT_TYPES))
 async def group_telethon_web_auth(
     callback: CallbackQuery,
     config: Config,
@@ -958,7 +1025,7 @@ async def group_telethon_web_auth(
     await callback.answer("Одноразовая ссылка отправлена вам в личный чат.", show_alert=True)
 
 
-@router.callback_query(F.data == "gtelethon:disconnect", F.message.chat.type.in_(GROUP_TYPES))
+@router.callback_query(F.data == "gtelethon:disconnect", F.message.chat.type.in_(ADMIN_CHAT_TYPES))
 async def group_telethon_disconnect(callback: CallbackQuery, config: Config, bot: Bot, telethon: TelethonManager):
     if not can_manage_telethon(callback.from_user.id, config):
         await callback.answer("Только владелец может отключить Telethon.", show_alert=True)
@@ -1490,7 +1557,7 @@ async def set_gp_merchant_command(message: Message, db: Database, config: Config
     await delete_incoming_later(message)
 
 
-@router.callback_query(F.data == "gadmin:market", F.message.chat.type.in_(GROUP_TYPES))
+@router.callback_query(F.data == "gadmin:market", F.message.chat.type.in_(ADMIN_CHAT_TYPES))
 async def group_admin_market(callback: CallbackQuery, db: Database, config: Config, telethon: TelethonManager):
     if not await has_permission(callback.from_user.id, "market.manage", db, config):
         await callback.answer("Недостаточно прав", show_alert=True)
@@ -1510,7 +1577,7 @@ async def group_admin_market(callback: CallbackQuery, db: Database, config: Conf
     await callback.answer()
 
 
-@router.callback_query(F.data == "gmarket_settings:merchant", F.message.chat.type.in_(GROUP_TYPES))
+@router.callback_query(F.data == "gmarket_settings:merchant", F.message.chat.type.in_(ADMIN_CHAT_TYPES))
 async def group_market_merchant_start(callback: CallbackQuery, db: Database, state: FSMContext, config: Config):
     if not await has_permission(callback.from_user.id, "market.manage", db, config):
         await callback.answer("Недостаточно прав", show_alert=True)
@@ -1528,7 +1595,7 @@ async def group_market_merchant_start(callback: CallbackQuery, db: Database, sta
     await callback.answer()
 
 
-@router.message(GroupMarketSettings.merchant_target, F.chat.type.in_(GROUP_TYPES))
+@router.message(GroupMarketSettings.merchant_target, F.chat.type.in_(ADMIN_CHAT_TYPES))
 async def group_market_merchant_save(message: Message, db: Database, state: FSMContext, config: Config):
     if not message.from_user or not await has_permission(message.from_user.id, "market.manage", db, config):
         return
@@ -1674,7 +1741,7 @@ async def group_order_status(callback: CallbackQuery, db: Database, config: Conf
 # Shared cancel for all group-first workflows
 # ---------------------------------------------------------------------------
 
-@router.callback_query(F.data == "gflow:cancel", F.message.chat.type.in_(GROUP_TYPES))
+@router.callback_query(F.data == "gflow:cancel", F.message.chat.type.in_(ADMIN_CHAT_TYPES))
 async def group_flow_cancel(callback: CallbackQuery, state: FSMContext):
     await state.clear()
     try:

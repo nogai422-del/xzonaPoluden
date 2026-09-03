@@ -20,7 +20,7 @@ from .states import GroupDiplomacy, GroupEventCreate, GroupGpStock, GroupInfoCre
 from .telethon_manager import TelethonManager
 
 router = Router(name="multitask_v7")
-ANNOUNCE_VERSION = "v7.3"
+ANNOUNCE_VERSION = "v7.4"
 
 TOPICS: dict[str, dict[str, str]] = {
     "general": {"label": "General", "emoji": "💬"},
@@ -302,6 +302,13 @@ async def startup_announcements(bot: Bot, db: Database, config: Config, telethon
         return
     await asyncio.sleep(3)
     await announce_configured_topics(bot, db, force=False)
+    # Surface role requests that may already exist from v7.3 or a previous import.
+    try:
+        from .handlers import publish_role_request_card
+        for req in await db.list_pending_role_requests(limit=200):
+            await publish_role_request_card(bot, db, req.id)
+    except Exception:
+        pass
 
     while True:
         primary_raw = await db.get_setting("primary_chat_id")
@@ -739,7 +746,7 @@ async def delivery_issue(cb:CallbackQuery,db:Database,config:Config,bot:Bot):
     await db.audit(cb.from_user.id, 'delivery.issue', f"order #{oid}")
     await cb.answer("Выдача отмечена")
 
-@router.callback_query(F.data == "gadmin:system", F.message.chat.type.in_(GROUP_TYPES))
+@router.callback_query(F.data == "gadmin:system", F.message.chat.type.in_(ADMIN_CHAT_TYPES))
 async def system_admin(cb: CallbackQuery, db: Database, config: Config, telethon: TelethonManager):
     if not await has_permission(cb.from_user.id, "roles.manage", db, config):
         return await cb.answer("Недостаточно прав", show_alert=True)
@@ -769,7 +776,7 @@ async def system_admin(cb: CallbackQuery, db: Database, config: Config, telethon
     await cb.answer()
 
 
-@router.callback_query(F.data == "v7admin:announce", F.message.chat.type.in_(GROUP_TYPES))
+@router.callback_query(F.data == "v7admin:announce", F.message.chat.type.in_(ADMIN_CHAT_TYPES))
 async def system_announce(cb: CallbackQuery, db: Database, config: Config, bot: Bot):
     if not await has_permission(cb.from_user.id, "roles.manage", db, config):
         return await cb.answer("Недостаточно прав", show_alert=True)
@@ -778,7 +785,7 @@ async def system_announce(cb: CallbackQuery, db: Database, config: Config, bot: 
     await cb.answer(f"Опубликовано в {count} разделах", show_alert=True)
 
 
-@router.callback_query(F.data == "v7admin:audit", F.message.chat.type.in_(GROUP_TYPES))
+@router.callback_query(F.data == "v7admin:audit", F.message.chat.type.in_(ADMIN_CHAT_TYPES))
 async def system_audit(cb: CallbackQuery, db: Database, config: Config):
     if not await has_permission(cb.from_user.id, "roles.manage", db, config):
         return await cb.answer("Недостаточно прав", show_alert=True)
