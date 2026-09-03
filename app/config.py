@@ -38,9 +38,14 @@ def _public_url(port: int) -> str:
 
 
 def load_config() -> Config:
-    token = os.getenv("BOT_TOKEN", "").strip()
+    token = ""
+    for key in ("BOT_TOKEN", "TELEGRAM_BOT_TOKEN", "TOKEN", "API_TOKEN"):
+        value = os.getenv(key, "").strip()
+        if value:
+            token = value
+            break
     if not token:
-        raise RuntimeError("BOT_TOKEN is not set. Copy .env.example to .env and fill it in.")
+        raise RuntimeError("Telegram bot token is not set (BOT_TOKEN / TELEGRAM_BOT_TOKEN / TOKEN / API_TOKEN).")
 
     raw_admins = os.getenv("ADMIN_IDS", "")
     admin_ids = {int(part.strip()) for part in raw_admins.split(",") if part.strip().isdigit()}
@@ -60,8 +65,10 @@ def load_config() -> Config:
     db_path.parent.mkdir(parents=True, exist_ok=True)
 
     platform_port = os.getenv("PORT", "").strip()
-    raw_port = platform_port or os.getenv("TELETHON_WEB_PORT", "8088").strip()
-    web_port = int(raw_port) if raw_port.isdigit() else 8088
+    raw_port = platform_port or os.getenv("TELETHON_WEB_PORT", "8080").strip()
+    web_port = int(raw_port) if raw_port.isdigit() else 8080
+    if not 1 <= web_port <= 65535:
+        web_port = 8080
     default_host = "0.0.0.0" if platform_port else "127.0.0.1"
     web_host = os.getenv("TELETHON_WEB_HOST", default_host).strip() or default_host
     web_public_url = _public_url(web_port)
