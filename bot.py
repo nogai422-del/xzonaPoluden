@@ -6,6 +6,7 @@ import logging
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
+from aiogram.fsm.strategy import FSMStrategy
 
 from app.access_control import ExternalMemberTopicMiddleware, TopicMirrorMiddleware
 from app.config import load_config
@@ -45,7 +46,7 @@ async def main() -> None:
     await telethon_web.start()
     log.info("Web/Telethon auth listening on %s:%s; public=%s", config.telethon_web_host, config.telethon_web_port, config.telethon_web_public_url)
 
-    dp = Dispatcher()
+    dp = Dispatcher(fsm_strategy=FSMStrategy.USER_IN_TOPIC)
     # Moderation must run before mirroring so a forbidden external message is never copied.
     dp.message.outer_middleware(ExternalMemberTopicMiddleware())
     dp.message.outer_middleware(TopicMirrorMiddleware())

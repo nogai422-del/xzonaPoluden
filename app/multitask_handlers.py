@@ -14,14 +14,14 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 from .config import Config
 from .db import Database
 from .group_handlers import GROUP_TYPES, WORKFLOW_LABELS, flow_edit_from_message, has_permission, market_order_group_text, refresh_order_cards, safe_delete
-from .housekeeping import cleanup_all_tracked_messages, delete_incoming_later, schedule_delete, temp_answer, temp_callback_message
+from .housekeeping import cleanup_all_tracked_messages, delete_incoming_later, schedule_delete, temp_answer, temp_callback_message, topic_answer
 from .roles import INTERNAL_POSITION_ORDER, POSITIONS, ROLE_CAPACITIES, is_external_position
 from .states import GroupDiplomacy, GroupEventCreate, GroupGpStock, GroupInfoCreate, GroupTargetCreate
 from .telethon_manager import TelethonManager
 
 router = Router(name="multitask_v7")
 ADMIN_CHAT_TYPES = set(GROUP_TYPES) | {"private"}
-ANNOUNCE_VERSION = "v7.4.2"
+ANNOUNCE_VERSION = "v7.5"
 
 TOPICS: dict[str, dict[str, str]] = {
     "general": {"label": "General", "emoji": "💬"},
@@ -168,7 +168,7 @@ def topic_intro(code: str) -> tuple[str, InlineKeyboardMarkup | None]:
     elif code == "gp_stock": buttons = [[InlineKeyboardButton(text="📋 Остатки", callback_data="v7stock:list"), InlineKeyboardButton(text="✏️ Изменить", callback_data="v7stock:set")]]
     elif code == "events": buttons = [[InlineKeyboardButton(text="📅 Ближайшие", callback_data="v7events:list"), InlineKeyboardButton(text="➕ Создать", callback_data="v7events:new")]]
     elif code == "diplomacy": buttons = [
-        [InlineKeyboardButton(text="📋 Отношения", callback_data="v7dip:list"), InlineKeyboardButton(text="✏️ Изменить", callback_data="v7dip:new")],
+        [InlineKeyboardButton(text="📋 Отношения", callback_data="v7dip:list"), InlineKeyboardButton(text="🧭 Группировки", callback_data="v7dip:new")],
         [InlineKeyboardButton(text="📜 История", callback_data="v7dip:history")],
     ]
     elif code == "targets": buttons = [[InlineKeyboardButton(text="🎯 Активные цели", callback_data="v7targets:list"), InlineKeyboardButton(text="➕ Добавить", callback_data="v7targets:new")]]
@@ -429,17 +429,17 @@ async def stock_list(cb: CallbackQuery, db: Database, config: Config):
 async def stock_set_start(cb: CallbackQuery, db: Database, config: Config, state: FSMContext):
     if not await has_permission(cb.from_user.id,"gp_stock.manage",db,config): return await cb.answer("Недостаточно прав",show_alert=True)
     await state.clear(); await state.update_data(flow_chat_id=cb.message.chat.id,flow_thread_id=_thread(cb.message)); await state.set_state(GroupGpStock.item_name)
-    sent = await cb.message.answer("Введите название предмета:")
+    sent = await topic_answer(cb.message, "Введите название предмета:")
     await state.update_data(flow_message_id=sent.message_id)
     await cb.answer()
 
-@router.message(GroupGpStock.item_name, F.chat.type.in_(GROUP_TYPES))
+@router.message(GroupGpStock.item_name, F.chat.type.in_(GROUP_TYPES), ~F.text.startswith("/"))
 async def stock_name(m: Message, state: FSMContext):
     name=(m.text or "").strip()
     if not name: return
     await state.update_data(stock_name=name); await state.set_state(GroupGpStock.quantity); await safe_delete(m); await flow_edit_from_message(m, state, "Введите фактическое количество (целое число ≥ 0):")
 
-@router.message(GroupGpStock.quantity, F.chat.type.in_(GROUP_TYPES))
+@router.message(GroupGpStock.quantity, F.chat.type.in_(GROUP_TYPES), ~F.text.startswith("/"))
 async def stock_qty(m: Message, db: Database, config: Config, state: FSMContext):
     if not m.from_user or not await has_permission(m.from_user.id,"gp_stock.manage",db,config): return
     raw=(m.text or "").strip()
@@ -507,27 +507,27 @@ async def events_list(cb:CallbackQuery,db:Database,config:Config):
 async def event_new(cb:CallbackQuery,db:Database,config:Config,state:FSMContext):
     if not await has_permission(cb.from_user.id,"events.manage",db,config): return await cb.answer("Недостаточно прав",show_alert=True)
     await state.clear(); await state.update_data(flow_chat_id=cb.message.chat.id,flow_thread_id=_thread(cb.message)); await state.set_state(GroupEventCreate.title)
-    sent = await cb.message.answer("Название мероприятия:")
+    sent = await topic_answer(cb.message, "Название мероприятия:")
     await state.update_data(flow_message_id=sent.message_id); await cb.answer()
 
-@router.message(GroupEventCreate.title,F.chat.type.in_(GROUP_TYPES))
+@router.message(GroupEventCreate.title, F.chat.type.in_(GROUP_TYPES), ~F.text.startswith("/"))
 async def event_title(m: Message, state: FSMContext):
     await state.update_data(event_title=(m.text or '').strip())
     await state.set_state(GroupEventCreate.starts_at)
     await safe_delete(m)
     await flow_edit_from_message(m, state, "Дата и время, например <code>05.09.2026 20:00</code>:")
-@router.message(GroupEventCreate.starts_at,F.chat.type.in_(GROUP_TYPES))
+@router.message(GroupEventCreate.starts_at, F.chat.type.in_(GROUP_TYPES), ~F.text.startswith("/"))
 async def event_date(m:Message,state:FSMContext):
     raw=(m.text or '').strip()
     try: dt=datetime.strptime(raw,"%d.%m.%Y %H:%M"); value=dt.isoformat(timespec='minutes')
     except ValueError: return await temp_answer(m, "Формат: <code>ДД.ММ.ГГГГ ЧЧ:ММ</code>.", ttl=60)
     await state.update_data(event_starts=value); await state.set_state(GroupEventCreate.capacity); await safe_delete(m); await flow_edit_from_message(m, state, "Лимит участников (0 = без лимита):")
-@router.message(GroupEventCreate.capacity,F.chat.type.in_(GROUP_TYPES))
+@router.message(GroupEventCreate.capacity, F.chat.type.in_(GROUP_TYPES), ~F.text.startswith("/"))
 async def event_capacity(m:Message,state:FSMContext):
     raw=(m.text or '').strip()
     if not raw.isdigit(): return await temp_answer(m, "Введите число 0 или больше.", ttl=60)
     await state.update_data(event_capacity=int(raw)); await state.set_state(GroupEventCreate.details); await safe_delete(m); await flow_edit_from_message(m, state, "Описание мероприятия или <code>-</code>, если не нужно:")
-@router.message(GroupEventCreate.details,F.chat.type.in_(GROUP_TYPES))
+@router.message(GroupEventCreate.details, F.chat.type.in_(GROUP_TYPES), ~F.text.startswith("/"))
 async def event_details(m:Message,db:Database,config:Config,state:FSMContext,bot:Bot):
     if not m.from_user or not await has_permission(m.from_user.id,"events.manage",db,config): return
     data=await state.get_data(); details=None if (m.text or '').strip()=='-' else (m.text or '').strip(); await safe_delete(m)
@@ -538,9 +538,9 @@ async def event_details(m:Message,db:Database,config:Config,state:FSMContext,bot
             await m.bot.edit_message_text(chat_id=m.chat.id, message_id=int(flow_id), text=event_text(e, {}), reply_markup=event_keyboard(eid, 'open'))
             await db.set_event_message(eid, int(flow_id))
         except Exception:
-            sent = await m.answer(event_text(e, {}), reply_markup=event_keyboard(eid, 'open')); await db.set_event_message(eid, sent.message_id)
+            sent = await topic_answer(m, event_text(e, {}), reply_markup=event_keyboard(eid, 'open')); await db.set_event_message(eid, sent.message_id)
     else:
-        sent = await m.answer(event_text(e, {}), reply_markup=event_keyboard(eid, 'open')); await db.set_event_message(eid, sent.message_id)
+        sent = await topic_answer(m, event_text(e, {}), reply_markup=event_keyboard(eid, 'open')); await db.set_event_message(eid, sent.message_id)
     await state.clear()
 
 @router.callback_query(F.data.regexp(r"^v7event:(join|leave|close|done):\d+$"))
@@ -557,51 +557,281 @@ async def event_action(cb:CallbackQuery,db:Database,config:Config,bot:Bot):
 
 
 # -------------------- Diplomacy --------------------
+# Main human factions from the original S.T.A.L.K.E.R. trilogy.
+DIPLOMACY_FACTIONS: tuple[tuple[str, str], ...] = (
+    ("loners", "\u041e\u0434\u0438\u043d\u043e\u0447\u043a\u0438"),
+    ("bandits", "\u0411\u0430\u043d\u0434\u0438\u0442\u044b"),
+    ("duty", "\u0414\u043e\u043b\u0433"),
+    ("freedom", "\u0421\u0432\u043e\u0431\u043e\u0434\u0430"),
+    ("mercs", "\u041d\u0430\u0451\u043c\u043d\u0438\u043a\u0438"),
+    ("monolith", "\u041c\u043e\u043d\u043e\u043b\u0438\u0442"),
+    ("scientists", "\u0423\u0447\u0451\u043d\u044b\u0435"),
+    ("military", "\u0412\u043e\u0435\u043d\u043d\u044b\u0435"),
+    ("clear_sky", "\u0427\u0438\u0441\u0442\u043e\u0435 \u041d\u0435\u0431\u043e"),
+    ("renegades", "\u0420\u0435\u043d\u0435\u0433\u0430\u0442\u044b"),
+    # Kept because this faction is already used by the group's role model.
+    ("sin", "\u0413\u0440\u0435\u0445"),
+)
+DIPLOMACY_FACTION_BY_CODE = dict(DIPLOMACY_FACTIONS)
+REL_ICON = {"ally": "\U0001f7e2", "neutral": "\u26aa", "war": "\U0001f534"}
+
+
+def diplomacy_factions_keyboard() -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    pair: list[InlineKeyboardButton] = []
+    for code, label in DIPLOMACY_FACTIONS:
+        pair.append(InlineKeyboardButton(text=label, callback_data=f"v7dip:faction:{code}"))
+        if len(pair) == 2:
+            rows.append(pair)
+            pair = []
+    if pair:
+        rows.append(pair)
+    rows.append([InlineKeyboardButton(text="\u2795 \u0414\u0440\u0443\u0433\u0430\u044f \u0433\u0440\u0443\u043f\u043f\u0438\u0440\u043e\u0432\u043a\u0430", callback_data="v7dip:other")])
+    rows.append([InlineKeyboardButton(text="\u274c \u041e\u0442\u043c\u0435\u043d\u0430", callback_data="gflow:cancel")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def diplomacy_relation_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="\U0001f7e2 \u0421\u043e\u044e\u0437", callback_data="v7dip:rel:ally"),
+        InlineKeyboardButton(text="\u26aa \u041d\u0435\u0439\u0442\u0440\u0430\u043b", callback_data="v7dip:rel:neutral"),
+        InlineKeyboardButton(text="\U0001f534 \u0412\u043e\u0439\u043d\u0430", callback_data="v7dip:rel:war"),
+    ], [InlineKeyboardButton(text="\u274c \u041e\u0442\u043c\u0435\u043d\u0430", callback_data="gflow:cancel")]])
+
+
+def diplomacy_records_keyboard(rows: list[dict], can_manage: bool) -> InlineKeyboardMarkup | None:
+    buttons: list[list[InlineKeyboardButton]] = []
+    for r in rows[:40]:
+        title = f"{REL_ICON.get(r['relation'], '')} {r['faction_name']}"
+        if can_manage:
+            buttons.append([
+                InlineKeyboardButton(text=title[:44], callback_data=f"v7dip:edit:{r['id']}"),
+                InlineKeyboardButton(text="\U0001f5d1", callback_data=f"v7dip:delask:{r['id']}"),
+            ])
+        else:
+            buttons.append([InlineKeyboardButton(text=title[:52], callback_data="v7dip:noop")])
+    if can_manage:
+        buttons.append([InlineKeyboardButton(text="\u2795 \u0414\u043e\u0431\u0430\u0432\u0438\u0442\u044c / \u0438\u0437\u043c\u0435\u043d\u0438\u0442\u044c", callback_data="v7dip:new")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons) if buttons else None
+
+
+async def _dip_begin_choice(cb: CallbackQuery, state: FSMContext, text: str) -> None:
+    await state.clear()
+    await state.update_data(flow_chat_id=cb.message.chat.id, flow_thread_id=_thread(cb.message))
+    await state.set_state(GroupDiplomacy.faction)
+    sent = await topic_answer(cb.message, text, reply_markup=diplomacy_factions_keyboard())
+    await state.update_data(flow_message_id=sent.message_id)
+
+
 @router.callback_query(F.data == "v7dip:list")
-async def dip_list(cb:CallbackQuery,db:Database,config:Config):
-    if not await _internal_user(cb.from_user.id,db,config): return await cb.answer("Недоступно",show_alert=True)
-    rows=await db.diplomacy_list(); text="<b>🤝 Отношения группировки</b>\n\n"+("\n".join(f"{REL.get(r['relation'],r['relation'])} — <b>{escape(r['faction_name'])}</b>"+(f" — {escape(r['note'])}" if r.get('note') else '') for r in rows) if rows else "Записей пока нет.")
-    await temp_callback_message(cb, text, ttl=config.temp_message_ttl); await cb.answer()
+async def dip_list(cb: CallbackQuery, db: Database, config: Config):
+    if not await _internal_user(cb.from_user.id, db, config):
+        return await cb.answer("\u041d\u0435\u0434\u043e\u0441\u0442\u0443\u043f\u043d\u043e", show_alert=True)
+    rows = await db.diplomacy_list()
+    body = "\n".join(
+        f"{REL.get(r['relation'], r['relation'])} \u2014 <b>{escape(r['faction_name'])}</b>"
+        + (f" \u2014 {escape(r['note'])}" if r.get('note') else "")
+        for r in rows
+    ) if rows else "\u0417\u0430\u043f\u0438\u0441\u0435\u0439 \u043f\u043e\u043a\u0430 \u043d\u0435\u0442."
+    can_manage = await has_permission(cb.from_user.id, "diplomacy.manage", db, config)
+    await temp_callback_message(
+        cb,
+        "<b>\U0001f91d \u041e\u0442\u043d\u043e\u0448\u0435\u043d\u0438\u044f \u0433\u0440\u0443\u043f\u043f\u0438\u0440\u043e\u0432\u043a\u0438</b>\n\n" + body,
+        ttl=max(config.temp_message_ttl, 180),
+        reply_markup=diplomacy_records_keyboard(rows, can_manage),
+    )
+    await cb.answer()
+
+
+@router.callback_query(F.data == "v7dip:noop")
+async def dip_noop(cb: CallbackQuery):
+    await cb.answer()
+
+
 @router.callback_query(F.data == "v7dip:history")
 async def dip_history(cb: CallbackQuery, db: Database, config: Config):
     if not await _internal_user(cb.from_user.id, db, config):
-        return await cb.answer("Недоступно", show_alert=True)
+        return await cb.answer("\u041d\u0435\u0434\u043e\u0441\u0442\u0443\u043f\u043d\u043e", show_alert=True)
     rows = await db.diplomacy_history(30)
-    text = "<b>📜 История дипломатии</b>\n\n" + (
+    text = "<b>\U0001f4dc \u0418\u0441\u0442\u043e\u0440\u0438\u044f \u0434\u0438\u043f\u043b\u043e\u043c\u0430\u0442\u0438\u0438</b>\n\n" + (
         "\n".join(
-            f"#{r['id']} {REL.get(r['relation'], r['relation'])} — <b>{escape(r['faction_name'])}</b>"
-            + (f" — {escape(r['note'])}" if r.get('note') else "")
+            f"#{r['id']} {REL.get(r['relation'], r['relation'])} \u2014 <b>{escape(r['faction_name'])}</b>"
+            + (f" \u2014 {escape(r['note'])}" if r.get('note') else "")
             for r in rows
-        ) if rows else "История пока пуста."
+        ) if rows else "\u0418\u0441\u0442\u043e\u0440\u0438\u044f \u043f\u043e\u043a\u0430 \u043f\u0443\u0441\u0442\u0430."
     )
     await temp_callback_message(cb, text, ttl=config.temp_message_ttl)
     await cb.answer()
 
 
 @router.callback_query(F.data == "v7dip:new")
-async def dip_new(cb:CallbackQuery,db:Database,config:Config,state:FSMContext):
-    if not await has_permission(cb.from_user.id,"diplomacy.manage",db,config): return await cb.answer("Недостаточно прав",show_alert=True)
-    await state.clear(); await state.set_state(GroupDiplomacy.faction)
-    sent = await cb.message.answer("Название группировки:"); await state.update_data(flow_message_id=sent.message_id); await cb.answer()
-@router.message(GroupDiplomacy.faction,F.chat.type.in_(GROUP_TYPES))
-async def dip_faction(m:Message,state:FSMContext):
-    await state.update_data(dip_faction=(m.text or '').strip()); await state.set_state(GroupDiplomacy.relation); await safe_delete(m)
-    kb=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🟢 Союз",callback_data="v7dip:rel:ally"),InlineKeyboardButton(text="⚪ Нейтрал",callback_data="v7dip:rel:neutral"),InlineKeyboardButton(text="🔴 Война",callback_data="v7dip:rel:war")]])
-    await flow_edit_from_message(m, state, "Выберите статус отношений:", reply_markup=kb)
-@router.callback_query(GroupDiplomacy.relation,F.data.startswith("v7dip:rel:"))
-async def dip_rel(cb:CallbackQuery,state:FSMContext):
-    await state.update_data(dip_relation=cb.data.rsplit(':',1)[1]); await state.set_state(GroupDiplomacy.note); await cb.message.edit_text("Комментарий/причина или <code>-</code>:"); await cb.answer()
-@router.message(GroupDiplomacy.note,F.chat.type.in_(GROUP_TYPES))
-async def dip_note(m:Message,db:Database,config:Config,state:FSMContext):
-    if not m.from_user or not await has_permission(m.from_user.id,"diplomacy.manage",db,config): return
-    d=await state.get_data(); note=None if (m.text or '').strip()=='-' else (m.text or '').strip(); await db.diplomacy_set(d['dip_faction'],d['dip_relation'],note,m.from_user.id); await safe_delete(m)
-    flow_id=d.get("flow_message_id")
+async def dip_new(cb: CallbackQuery, db: Database, config: Config, state: FSMContext):
+    if not await has_permission(cb.from_user.id, "diplomacy.manage", db, config):
+        return await cb.answer("\u041d\u0435\u0434\u043e\u0441\u0442\u0430\u0442\u043e\u0447\u043d\u043e \u043f\u0440\u0430\u0432", show_alert=True)
+    await _dip_begin_choice(cb, state, "<b>\U0001f91d \u0412\u044b\u0431\u0435\u0440\u0438\u0442\u0435 \u0433\u0440\u0443\u043f\u043f\u0438\u0440\u043e\u0432\u043a\u0443</b>:")
+    await cb.answer()
+
+
+@router.callback_query(GroupDiplomacy.faction, F.data.startswith("v7dip:faction:"))
+async def dip_pick_faction(cb: CallbackQuery, state: FSMContext):
+    code = cb.data.rsplit(":", 1)[1]
+    faction = DIPLOMACY_FACTION_BY_CODE.get(code)
+    if not faction:
+        return await cb.answer("\u041d\u0435\u0438\u0437\u0432\u0435\u0441\u0442\u043d\u0430\u044f \u0433\u0440\u0443\u043f\u043f\u0438\u0440\u043e\u0432\u043a\u0430", show_alert=True)
+    await state.update_data(dip_faction=faction, dip_note=None)
+    await state.set_state(GroupDiplomacy.relation)
+    await cb.message.edit_text(
+        f"<b>{escape(faction)}</b>\n\n\u0412\u044b\u0431\u0435\u0440\u0438\u0442\u0435 \u0441\u0442\u0430\u0442\u0443\u0441 \u043e\u0442\u043d\u043e\u0448\u0435\u043d\u0438\u0439:",
+        reply_markup=diplomacy_relation_keyboard(),
+    )
+    await cb.answer()
+
+
+@router.callback_query(GroupDiplomacy.faction, F.data == "v7dip:other")
+async def dip_other_faction(cb: CallbackQuery, state: FSMContext):
+    await cb.message.edit_text("\u0412\u0432\u0435\u0434\u0438\u0442\u0435 \u043d\u0430\u0437\u0432\u0430\u043d\u0438\u0435 \u0434\u0440\u0443\u0433\u043e\u0439 \u0433\u0440\u0443\u043f\u043f\u0438\u0440\u043e\u0432\u043a\u0438:")
+    await cb.answer()
+
+
+@router.message(GroupDiplomacy.faction, F.chat.type.in_(GROUP_TYPES), ~F.text.startswith("/"))
+async def dip_faction(m: Message, state: FSMContext):
+    faction = (m.text or "").strip()
+    if not faction:
+        return
+    await state.update_data(dip_faction=faction, dip_note=None)
+    await state.set_state(GroupDiplomacy.relation)
+    await safe_delete(m)
+    await flow_edit_from_message(m, state, f"<b>{escape(faction)}</b>\n\n\u0412\u044b\u0431\u0435\u0440\u0438\u0442\u0435 \u0441\u0442\u0430\u0442\u0443\u0441 \u043e\u0442\u043d\u043e\u0448\u0435\u043d\u0438\u0439:", reply_markup=diplomacy_relation_keyboard())
+
+
+@router.callback_query(F.data.regexp(r"^v7dip:edit:\d+$"))
+async def dip_edit(cb: CallbackQuery, db: Database, config: Config, state: FSMContext):
+    if not await has_permission(cb.from_user.id, "diplomacy.manage", db, config):
+        return await cb.answer("\u041d\u0435\u0434\u043e\u0441\u0442\u0430\u0442\u043e\u0447\u043d\u043e \u043f\u0440\u0430\u0432", show_alert=True)
+    rid = int(cb.data.rsplit(":", 1)[1])
+    row = await db.diplomacy_get(rid)
+    if not row:
+        return await cb.answer("\u0417\u0430\u043f\u0438\u0441\u044c \u0443\u0436\u0435 \u0443\u0434\u0430\u043b\u0435\u043d\u0430", show_alert=True)
+    await state.clear()
+    await state.update_data(
+        flow_chat_id=cb.message.chat.id,
+        flow_thread_id=_thread(cb.message),
+        dip_faction=row['faction_name'],
+        dip_note=row.get('note'),
+        dip_record_id=rid,
+    )
+    await state.set_state(GroupDiplomacy.relation)
+    sent = await topic_answer(
+        cb.message,
+        f"<b>{escape(row['faction_name'])}</b>\n\n\u0422\u0435\u043a\u0443\u0449\u0438\u0439 \u0441\u0442\u0430\u0442\u0443\u0441: {REL.get(row['relation'], row['relation'])}\n\u0412\u044b\u0431\u0435\u0440\u0438\u0442\u0435 \u043d\u043e\u0432\u044b\u0439:",
+        reply_markup=diplomacy_relation_keyboard(),
+    )
+    await state.update_data(flow_message_id=sent.message_id)
+    await cb.answer()
+
+
+@router.callback_query(GroupDiplomacy.relation, F.data.startswith("v7dip:rel:"))
+async def dip_rel(cb: CallbackQuery, db: Database, config: Config, state: FSMContext):
+    if not await has_permission(cb.from_user.id, "diplomacy.manage", db, config):
+        return await cb.answer("\u041d\u0435\u0434\u043e\u0441\u0442\u0430\u0442\u043e\u0447\u043d\u043e \u043f\u0440\u0430\u0432", show_alert=True)
+    relation = cb.data.rsplit(":", 1)[1]
+    if relation not in REL:
+        return await cb.answer("\u041d\u0435\u0432\u0435\u0440\u043d\u044b\u0439 \u0441\u0442\u0430\u0442\u0443\u0441", show_alert=True)
+    data = await state.get_data()
+    faction = data.get('dip_faction')
+    if not faction:
+        await state.clear()
+        return await cb.answer("\u0421\u0435\u0441\u0441\u0438\u044f \u0443\u0441\u0442\u0430\u0440\u0435\u043b\u0430", show_alert=True)
+    rid = await db.diplomacy_set(faction, relation, data.get('dip_note'), cb.from_user.id)
+    kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="\U0001f4dd \u041a\u043e\u043c\u043c\u0435\u043d\u0442\u0430\u0440\u0438\u0439", callback_data=f"v7dip:note:{rid}"),
+        InlineKeyboardButton(text="\U0001f5d1 \u0423\u0434\u0430\u043b\u0438\u0442\u044c", callback_data=f"v7dip:delask:{rid}"),
+    ]])
+    await cb.message.edit_text(f"\u2705 {REL[relation]} \u2014 <b>{escape(faction)}</b>", reply_markup=kb)
+    schedule_delete(cb.bot, cb.message.chat.id, cb.message.message_id, 180)
+    await state.clear()
+    await cb.answer("\u0421\u043e\u0445\u0440\u0430\u043d\u0435\u043d\u043e")
+
+
+@router.callback_query(F.data.regexp(r"^v7dip:note:\d+$"))
+async def dip_note_start(cb: CallbackQuery, db: Database, config: Config, state: FSMContext):
+    if not await has_permission(cb.from_user.id, "diplomacy.manage", db, config):
+        return await cb.answer("\u041d\u0435\u0434\u043e\u0441\u0442\u0430\u0442\u043e\u0447\u043d\u043e \u043f\u0440\u0430\u0432", show_alert=True)
+    rid = int(cb.data.rsplit(":", 1)[1])
+    row = await db.diplomacy_get(rid)
+    if not row:
+        return await cb.answer("\u0417\u0430\u043f\u0438\u0441\u044c \u043d\u0435 \u043d\u0430\u0439\u0434\u0435\u043d\u0430", show_alert=True)
+    await state.clear()
+    await state.update_data(
+        flow_chat_id=cb.message.chat.id,
+        flow_thread_id=_thread(cb.message),
+        dip_record_id=rid,
+        dip_faction=row['faction_name'],
+        dip_relation=row['relation'],
+    )
+    await state.set_state(GroupDiplomacy.note)
+    sent = await topic_answer(cb.message, "\u0412\u0432\u0435\u0434\u0438\u0442\u0435 \u043a\u043e\u043c\u043c\u0435\u043d\u0442\u0430\u0440\u0438\u0439/\u043f\u0440\u0438\u0447\u0438\u043d\u0443. <code>-</code> \u0443\u0434\u0430\u043b\u0438\u0442 \u043a\u043e\u043c\u043c\u0435\u043d\u0442\u0430\u0440\u0438\u0439:")
+    await state.update_data(flow_message_id=sent.message_id)
+    await cb.answer()
+
+
+@router.message(GroupDiplomacy.note, F.chat.type.in_(GROUP_TYPES), ~F.text.startswith("/"))
+async def dip_note(m: Message, db: Database, config: Config, state: FSMContext):
+    if not m.from_user or not await has_permission(m.from_user.id, "diplomacy.manage", db, config):
+        return
+    data = await state.get_data()
+    note = None if (m.text or '').strip() == '-' else (m.text or '').strip()
+    rid = await db.diplomacy_set(data['dip_faction'], data['dip_relation'], note, m.from_user.id)
+    await safe_delete(m)
+    flow_id = data.get('flow_message_id')
+    text = f"\u2705 {REL[data['dip_relation']]} \u2014 <b>{escape(data['dip_faction'])}</b>"
+    if note:
+        text += f"\n\U0001f4dd {escape(note)}"
     if flow_id:
         try:
-            await m.bot.edit_message_text(chat_id=m.chat.id,message_id=int(flow_id),text=f"✅ {REL[d['dip_relation']]} — <b>{escape(d['dip_faction'])}</b>")
-            schedule_delete(m.bot,m.chat.id,int(flow_id),45)
-        except Exception: await temp_answer(m,f"✅ {REL[d['dip_relation']]} — <b>{escape(d['dip_faction'])}</b>",ttl=45)
+            await m.bot.edit_message_text(chat_id=m.chat.id, message_id=int(flow_id), text=text)
+            schedule_delete(m.bot, m.chat.id, int(flow_id), 90)
+        except Exception:
+            await temp_answer(m, text, ttl=90)
+    else:
+        await temp_answer(m, text, ttl=90)
     await state.clear()
+
+
+@router.callback_query(F.data.regexp(r"^v7dip:delask:\d+$"))
+async def dip_delete_ask(cb: CallbackQuery, db: Database, config: Config):
+    if not await has_permission(cb.from_user.id, "diplomacy.manage", db, config):
+        return await cb.answer("\u041d\u0435\u0434\u043e\u0441\u0442\u0430\u0442\u043e\u0447\u043d\u043e \u043f\u0440\u0430\u0432", show_alert=True)
+    rid = int(cb.data.rsplit(":", 1)[1])
+    row = await db.diplomacy_get(rid)
+    if not row:
+        return await cb.answer("\u0417\u0430\u043f\u0438\u0441\u044c \u0443\u0436\u0435 \u0443\u0434\u0430\u043b\u0435\u043d\u0430", show_alert=True)
+    kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="\U0001f5d1 \u0414\u0430, \u0443\u0434\u0430\u043b\u0438\u0442\u044c", callback_data=f"v7dip:delete:{rid}"),
+        InlineKeyboardButton(text="\u21a9\ufe0f \u041d\u0435\u0442", callback_data="v7dip:noop"),
+    ]])
+    await temp_callback_message(
+        cb,
+        f"\u0423\u0434\u0430\u043b\u0438\u0442\u044c \u0437\u0430\u043f\u0438\u0441\u044c <b>{escape(row['faction_name'])}</b>?",
+        ttl=120,
+        reply_markup=kb,
+    )
+    await cb.answer()
+
+
+@router.callback_query(F.data.regexp(r"^v7dip:delete:\d+$"))
+async def dip_delete(cb: CallbackQuery, db: Database, config: Config, state: FSMContext):
+    if not await has_permission(cb.from_user.id, "diplomacy.manage", db, config):
+        return await cb.answer("\u041d\u0435\u0434\u043e\u0441\u0442\u0430\u0442\u043e\u0447\u043d\u043e \u043f\u0440\u0430\u0432", show_alert=True)
+    rid = int(cb.data.rsplit(":", 1)[1])
+    row = await db.diplomacy_get(rid)
+    ok = await db.diplomacy_delete(rid, cb.from_user.id)
+    if not ok:
+        return await cb.answer("\u0417\u0430\u043f\u0438\u0441\u044c \u0443\u0436\u0435 \u0443\u0434\u0430\u043b\u0435\u043d\u0430", show_alert=True)
+    await state.clear()
+    await cb.message.edit_text(f"\U0001f5d1 \u0423\u0434\u0430\u043b\u0435\u043d\u043e: <b>{escape(row['faction_name']) if row else rid}</b>")
+    schedule_delete(cb.bot, cb.message.chat.id, cb.message.message_id, 45)
+    await cb.answer("\u0423\u0434\u0430\u043b\u0435\u043d\u043e")
 
 
 # -------------------- Targets --------------------
@@ -622,22 +852,22 @@ async def targets_list(cb:CallbackQuery,db:Database,config:Config):
 @router.callback_query(F.data == "v7targets:new")
 async def target_new(cb:CallbackQuery,db:Database,config:Config,state:FSMContext):
     if not await has_permission(cb.from_user.id,"targets.manage",db,config): return await cb.answer("Недостаточно прав",show_alert=True)
-    await state.clear(); await state.set_state(GroupTargetCreate.name); sent=await cb.message.answer("Ник/название цели:"); await state.update_data(flow_message_id=sent.message_id); await cb.answer()
-@router.message(GroupTargetCreate.name,F.chat.type.in_(GROUP_TYPES))
+    await state.clear(); await state.set_state(GroupTargetCreate.name); sent=await topic_answer(cb.message, "Ник/название цели:"); await state.update_data(flow_message_id=sent.message_id); await cb.answer()
+@router.message(GroupTargetCreate.name, F.chat.type.in_(GROUP_TYPES), ~F.text.startswith("/"))
 async def t_name(m:Message,state:FSMContext): await state.update_data(t_name=(m.text or '').strip()); await state.set_state(GroupTargetCreate.reason); await safe_delete(m); await flow_edit_from_message(m,state,"Причина или <code>-</code>:")
-@router.message(GroupTargetCreate.reason,F.chat.type.in_(GROUP_TYPES))
+@router.message(GroupTargetCreate.reason, F.chat.type.in_(GROUP_TYPES), ~F.text.startswith("/"))
 async def t_reason(m:Message,state:FSMContext): await state.update_data(t_reason=None if (m.text or '').strip()=='-' else (m.text or '').strip()); await state.set_state(GroupTargetCreate.reward); await safe_delete(m); await flow_edit_from_message(m,state,"Награда или <code>-</code>:")
-@router.message(GroupTargetCreate.reward,F.chat.type.in_(GROUP_TYPES))
+@router.message(GroupTargetCreate.reward, F.chat.type.in_(GROUP_TYPES), ~F.text.startswith("/"))
 async def t_reward(m:Message,state:FSMContext): await state.update_data(t_reward=None if (m.text or '').strip()=='-' else (m.text or '').strip()); await state.set_state(GroupTargetCreate.location); await safe_delete(m); await flow_edit_from_message(m,state,"Последнее известное место или <code>-</code>:")
-@router.message(GroupTargetCreate.location,F.chat.type.in_(GROUP_TYPES))
+@router.message(GroupTargetCreate.location, F.chat.type.in_(GROUP_TYPES), ~F.text.startswith("/"))
 async def t_location(m:Message,db:Database,config:Config,state:FSMContext):
     if not m.from_user or not await has_permission(m.from_user.id,"targets.manage",db,config): return
     d=await state.get_data(); loc=None if (m.text or '').strip()=='-' else (m.text or '').strip(); tid=await db.target_create(d['t_name'],d['t_reason'],d['t_reward'],loc,m.from_user.id); await safe_delete(m); rows=await db.target_list(100); t=next(x for x in rows if x['id']==tid)
     flow_id=d.get("flow_message_id")
     if flow_id:
         try: await m.bot.edit_message_text(chat_id=m.chat.id,message_id=int(flow_id),text=target_card(t),reply_markup=target_kb(tid,'active'))
-        except Exception: await m.answer(target_card(t),reply_markup=target_kb(tid,'active'))
-    else: await m.answer(target_card(t),reply_markup=target_kb(tid,'active'))
+        except Exception: await topic_answer(m, target_card(t),reply_markup=target_kb(tid,'active'))
+    else: await topic_answer(m, target_card(t),reply_markup=target_kb(tid,'active'))
     await state.clear()
 @router.callback_query(F.data.regexp(r"^v7target:(active|taken|done|cancelled):\d+$"))
 async def target_action(cb:CallbackQuery,db:Database,config:Config):
@@ -660,10 +890,10 @@ async def info_list(cb:CallbackQuery,db:Database,config:Config):
 async def info_new(cb:CallbackQuery,db:Database,config:Config,state:FSMContext):
     module=cb.data.rsplit(':',1)[1]; perm='news.manage' if module=='news' else 'info.manage'
     if not await has_permission(cb.from_user.id,perm,db,config): return await cb.answer("Недостаточно прав",show_alert=True)
-    await state.clear(); await state.update_data(info_module=module); await state.set_state(GroupInfoCreate.title); sent=await cb.message.answer("Заголовок:"); await state.update_data(flow_message_id=sent.message_id); await cb.answer()
-@router.message(GroupInfoCreate.title,F.chat.type.in_(GROUP_TYPES))
+    await state.clear(); await state.update_data(info_module=module); await state.set_state(GroupInfoCreate.title); sent=await topic_answer(cb.message, "Заголовок:"); await state.update_data(flow_message_id=sent.message_id); await cb.answer()
+@router.message(GroupInfoCreate.title, F.chat.type.in_(GROUP_TYPES), ~F.text.startswith("/"))
 async def info_title(m:Message,state:FSMContext): await state.update_data(info_title=(m.text or '').strip()); await state.set_state(GroupInfoCreate.body); await safe_delete(m); await flow_edit_from_message(m,state,"Текст записи:")
-@router.message(GroupInfoCreate.body,F.chat.type.in_(GROUP_TYPES))
+@router.message(GroupInfoCreate.body, F.chat.type.in_(GROUP_TYPES), ~F.text.startswith("/"))
 async def info_body(m:Message,db:Database,config:Config,state:FSMContext):
     if not m.from_user: return
     d=await state.get_data(); module=d['info_module']; perm='news.manage' if module=='news' else 'info.manage'
@@ -673,8 +903,8 @@ async def info_body(m:Message,db:Database,config:Config,state:FSMContext):
     flow_id=d.get("flow_message_id")
     if flow_id:
         try: await m.bot.edit_message_text(chat_id=m.chat.id,message_id=int(flow_id),text=final)
-        except Exception: await m.answer(final)
-    else: await m.answer(final)
+        except Exception: await topic_answer(m, final)
+    else: await topic_answer(m, final)
     await state.clear()
 
 @router.message(Command("set_news_source"),F.chat.type.in_(GROUP_TYPES))

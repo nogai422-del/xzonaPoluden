@@ -55,8 +55,20 @@ def schedule_delete(bot: Bot, chat_id: int, message_id: int, delay: int = 90) ->
     _track(asyncio.create_task(_delete_after(bot, chat_id, message_id, delay)))
 
 
+def _same_topic_kwargs(message: Message) -> dict[str, int]:
+    if getattr(message, "is_topic_message", False) and message.message_thread_id is not None:
+        return {"message_thread_id": int(message.message_thread_id)}
+    return {}
+
+
+async def topic_answer(message: Message, text: str, **kwargs: Any) -> Message:
+    send_kwargs: dict[str, Any] = _same_topic_kwargs(message)
+    send_kwargs.update(kwargs)
+    return await message.bot.send_message(message.chat.id, text, **send_kwargs)
+
+
 async def temp_answer(message: Message, text: str, *, ttl: int = 90, **kwargs: Any) -> Message:
-    sent = await message.answer(text, **kwargs)
+    sent = await topic_answer(message, text, **kwargs)
     schedule_delete(message.bot, sent.chat.id, sent.message_id, ttl)
     return sent
 
@@ -64,7 +76,7 @@ async def temp_answer(message: Message, text: str, *, ttl: int = 90, **kwargs: A
 async def temp_callback_message(callback: CallbackQuery, text: str, *, ttl: int = 90, **kwargs: Any) -> Message | None:
     if not isinstance(callback.message, Message):
         return None
-    sent = await callback.message.answer(text, **kwargs)
+    sent = await topic_answer(callback.message, text, **kwargs)
     schedule_delete(callback.bot, sent.chat.id, sent.message_id, ttl)
     return sent
 

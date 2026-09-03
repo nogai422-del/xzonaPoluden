@@ -1,3 +1,7 @@
+# XZONA Group Bot v7.5 - forum routing and diplomacy update
+
+See `CHANGELOG_v7_5_RU.md` for the v7.5 fixes. Existing Bothost database is compatible.
+
 # XZONA Group Bot v7.4.3 — Bothost /admin hotfix
 
 > v7.4.3 исправляет молчащий `/admin`: в v7.4.2 отсутствовала функция `group_admin_text`, поэтому обработчик падал уже после получения команды. Теперь `/admin` и `/settings` в личке владельца открывают постоянную полную панель. База совместима, `bot.db` удалять не нужно.

@@ -42,7 +42,7 @@ from .roles import FACTIONS, INTERNAL_POSITION_ORDER, POSITIONS, ROLE_CAPACITIES
 from .states import GroupAddItem, GroupMarketOrder, GroupMarketSettings, GroupRoleAdmin
 from .telethon_manager import TelethonManager
 from .telethon_web import TelethonWebAuth
-from .housekeeping import temp_answer, temp_callback_message, temp_bot_message, delete_incoming_later, schedule_delete
+from .housekeeping import temp_answer, temp_callback_message, temp_bot_message, delete_incoming_later, schedule_delete, topic_answer
 
 router = Router(name="group_first")
 GROUP_TYPES = {"group", "supergroup"}
@@ -350,7 +350,7 @@ async def flow_edit_from_message(
             return None
         except Exception:
             pass
-    sent = await message.answer(text, reply_markup=reply_markup)
+    sent = await topic_answer(message, text, reply_markup=reply_markup)
     await state.update_data(flow_message_id=sent.message_id)
     return sent
 
@@ -645,7 +645,7 @@ async def clear_role_command(message: Message, db: Database, config: Config, bot
 async def group_admin(message: Message, db: Database, config: Config, telethon: TelethonManager):
     if not message.from_user or not await can_manage_roles(message.from_user.id, db, config):
         if message.chat.type == "private":
-            await message.answer("Недостаточно прав. Проверьте OWNER_ID/ADMIN_IDS и команду /myid.")
+            await topic_answer(message, "Недостаточно прав. Проверьте OWNER_ID/ADMIN_IDS и команду /myid.")
         else:
             await temp_answer(message, "Недостаточно прав.", ttl=45)
         return
@@ -656,7 +656,7 @@ async def group_admin(message: Message, db: Database, config: Config, telethon: 
     else:
         # In private chat the settings panel is intentionally persistent: it is the
         # owner's control console and should not disappear after the cleanup TTL.
-        await message.answer(await group_admin_text(db, telethon), reply_markup=group_admin_menu())
+        await topic_answer(message, await group_admin_text(db, telethon), reply_markup=group_admin_menu())
 
 
 @router.callback_query(F.data == "gadmin:home", F.message.chat.type.in_(ADMIN_CHAT_TYPES))
@@ -909,7 +909,7 @@ async def group_role_search_start(callback: CallbackQuery, db: Database, config:
     await callback.answer()
 
 
-@router.message(GroupRoleAdmin.search, F.chat.type.in_(ADMIN_CHAT_TYPES))
+@router.message(GroupRoleAdmin.search, F.chat.type.in_(ADMIN_CHAT_TYPES), ~F.text.startswith("/"))
 async def group_role_search_input(message: Message, db: Database, config: Config, state: FSMContext):
     if not message.from_user or not await can_manage_roles(message.from_user.id, db, config):
         await state.clear()
@@ -1095,7 +1095,7 @@ async def show_group_players(callback: CallbackQuery, db: Database, state: FSMCo
     if edit:
         await callback.message.edit_text(text, reply_markup=markup)
     else:
-        sent = await callback.message.answer(text, reply_markup=markup)
+        sent = await topic_answer(callback.message, text, reply_markup=markup)
         await state.update_data(flow_message_id=sent.message_id)
     await callback.answer()
 
@@ -1170,7 +1170,7 @@ async def group_storage_recent(callback: CallbackQuery, db: Database, state: FSM
     await callback.answer()
 
 
-@router.message(GroupAddItem.name, F.chat.type.in_(GROUP_TYPES))
+@router.message(GroupAddItem.name, F.chat.type.in_(GROUP_TYPES), ~F.text.startswith("/"))
 async def group_storage_name(message: Message, db: Database, state: FSMContext, config: Config):
     if not message.from_user or not await has_permission(message.from_user.id, "storage.manage", db, config):
         return
@@ -1207,7 +1207,7 @@ async def group_storage_qty_button(callback: CallbackQuery, db: Database, state:
     await callback.answer()
 
 
-@router.message(GroupAddItem.quantity, F.chat.type.in_(GROUP_TYPES))
+@router.message(GroupAddItem.quantity, F.chat.type.in_(GROUP_TYPES), ~F.text.startswith("/"))
 async def group_storage_qty_text(message: Message, db: Database, state: FSMContext, config: Config):
     if not message.from_user or not await has_permission(message.from_user.id, "storage.manage", db, config):
         return
@@ -1256,7 +1256,7 @@ async def group_storage_comment_skip(callback: CallbackQuery, db: Database, stat
     await callback.answer()
 
 
-@router.message(GroupAddItem.comment, F.chat.type.in_(GROUP_TYPES))
+@router.message(GroupAddItem.comment, F.chat.type.in_(GROUP_TYPES), ~F.text.startswith("/"))
 async def group_storage_comment(message: Message, db: Database, state: FSMContext, config: Config):
     if not message.from_user or not await has_permission(message.from_user.id, "storage.manage", db, config):
         return
@@ -1339,7 +1339,7 @@ async def group_market_new(callback: CallbackQuery, db: Database, state: FSMCont
         market_comment=None,
     )
     await state.set_state(GroupMarketOrder.item_name)
-    sent = await callback.message.answer(
+    sent = await topic_answer(callback.message, 
         f"🛒 Новый заказ от <b>{escape(player.game_nickname)}</b>\n\n🎒 Напишите название первой позиции:",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="gflow:cancel")]]),
     )
@@ -1347,7 +1347,7 @@ async def group_market_new(callback: CallbackQuery, db: Database, state: FSMCont
     await callback.answer()
 
 
-@router.message(GroupMarketOrder.item_name, F.chat.type.in_(GROUP_TYPES))
+@router.message(GroupMarketOrder.item_name, F.chat.type.in_(GROUP_TYPES), ~F.text.startswith("/"))
 async def group_market_item_name(message: Message, state: FSMContext):
     if not await flow_matches_message(message, state):
         await temp_answer(message, "Продолжите оформление заказа в теме Рынок ГП.", ttl=60)
@@ -1394,7 +1394,7 @@ async def group_market_qty_button(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 
-@router.message(GroupMarketOrder.quantity, F.chat.type.in_(GROUP_TYPES))
+@router.message(GroupMarketOrder.quantity, F.chat.type.in_(GROUP_TYPES), ~F.text.startswith("/"))
 async def group_market_qty_text(message: Message, state: FSMContext):
     if not await flow_matches_message(message, state):
         await temp_answer(message, "Продолжите оформление заказа в теме Рынок ГП.", ttl=60)
@@ -1435,7 +1435,7 @@ async def group_market_comment_start(callback: CallbackQuery, state: FSMContext)
     await callback.answer()
 
 
-@router.message(GroupMarketOrder.comment, F.chat.type.in_(GROUP_TYPES))
+@router.message(GroupMarketOrder.comment, F.chat.type.in_(GROUP_TYPES), ~F.text.startswith("/"))
 async def group_market_comment_text(message: Message, state: FSMContext):
     if not await flow_matches_message(message, state):
         await temp_answer(message, "Продолжите оформление заказа в теме Рынок ГП.", ttl=60)
@@ -1630,7 +1630,7 @@ async def group_market_merchant_start(callback: CallbackQuery, db: Database, sta
     await callback.answer()
 
 
-@router.message(GroupMarketSettings.merchant_target, F.chat.type.in_(ADMIN_CHAT_TYPES))
+@router.message(GroupMarketSettings.merchant_target, F.chat.type.in_(ADMIN_CHAT_TYPES), ~F.text.startswith("/"))
 async def group_market_merchant_save(message: Message, db: Database, state: FSMContext, config: Config):
     if not message.from_user or not await has_permission(message.from_user.id, "market.manage", db, config):
         return

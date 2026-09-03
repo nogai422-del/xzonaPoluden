@@ -12,7 +12,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from .config import Config
-from .housekeeping import temp_answer
+from .housekeeping import temp_answer, topic_answer
 from .db import Database, MarketOrder as DbMarketOrder, MarketOrderItem, StorageItem
 from .keyboards import (
     admin_menu,
@@ -138,7 +138,7 @@ async def safe_delete(message: Message) -> None:
 async def ensure_private(message: Message) -> bool:
     if message.chat.type == "private":
         return True
-    await message.answer("Эта операция доступна только в личном чате с ботом.")
+    await topic_answer(message, "Эта операция доступна только в личном чате с ботом.")
     return False
 
 
@@ -149,7 +149,7 @@ async def ensure_registered(message: Message, db: Database, state: FSMContext, a
     await state.set_state(RegisterPlayer.nickname)
     if after_register:
         await state.update_data(after_register=after_register)
-    await message.answer("👤 Сначала укажите ваш <b>ник в игре</b>:")
+    await topic_answer(message, "👤 Сначала укажите ваш <b>ник в игре</b>:")
     return False
 
 
@@ -319,13 +319,13 @@ async def send_to_merchant(bot: Bot, telethon: TelethonManager, target: str, tex
 @router.message(Command("set_nicks_topic"))
 async def set_nicks_topic(message: Message, db: Database, config: Config):
     if not is_admin(message.from_user.id, config):
-        await message.answer("Недостаточно прав.")
+        await topic_answer(message, "Недостаточно прав.")
         return
     if not message.is_topic_message or message.message_thread_id is None:
-        await message.answer("Отправьте эту команду прямо внутри темы «Ники игроков».")
+        await topic_answer(message, "Отправьте эту команду прямо внутри темы «Ники игроков».")
         return
     await db.set_nicks_topic(message.chat.id, message.message_thread_id)
-    await message.answer(
+    await topic_answer(message, 
         "✅ Эта тема назначена источником ников.\n\n"
         "Новые сообщения игроков будут сохраняться автоматически.\n\n"
         "📚 Старые ники импортируются без отдельного скрипта: /admin в группе → 👥 Ники игроков → 🔄 Импортировать старые ники."
@@ -335,14 +335,14 @@ async def set_nicks_topic(message: Message, db: Database, config: Config):
 @router.message(Command("set_market_topic"))
 async def set_market_topic(message: Message, db: Database, config: Config, bot: Bot):
     if not is_admin(message.from_user.id, config):
-        await message.answer("Недостаточно прав.")
+        await topic_answer(message, "Недостаточно прав.")
         return
     if not message.is_topic_message or message.message_thread_id is None:
-        await message.answer("Отправьте эту команду прямо внутри темы «Рынок ГП».")
+        await topic_answer(message, "Отправьте эту команду прямо внутри темы «Рынок ГП».")
         return
     await db.set_market_topic(message.chat.id, message.message_thread_id)
     me = await bot.get_me()
-    await message.answer(
+    await topic_answer(message, 
         "✅ Эта тема назначена как <b>Рынок ГП</b>.\n\n"
         "Заказы оформляются прямо в этой теме и отправляются Торговцу ГП.",
         reply_markup=market_topic_panel(me.username),
@@ -352,11 +352,11 @@ async def set_market_topic(message: Message, db: Database, config: Config, bot: 
 @router.message(Command("nicks_status"))
 async def nicks_status(message: Message, db: Database, config: Config, telethon: TelethonManager):
     if not is_admin(message.from_user.id, config):
-        await message.answer("Недостаточно прав.")
+        await topic_answer(message, "Недостаточно прав.")
         return
     topic = await db.get_nicks_topic()
     if not topic:
-        await message.answer("Тема с никами ещё не настроена. Откройте «Ники игроков» и отправьте /set_nicks_topic.")
+        await topic_answer(message, "Тема с никами ещё не настроена. Откройте «Ники игроков» и отправьте /set_nicks_topic.")
         return
     chat_id, thread_id = topic
     imported_at, imported_count = await db.get_nicks_history_import_status()
@@ -367,7 +367,7 @@ async def nicks_status(message: Message, db: Database, config: Config, telethon:
         if imported_at
         else "⚠️ Старая история ещё не импортирована."
     )
-    await message.answer(
+    await topic_answer(message, 
         "✅ Источник ников настроен.\n"
         f"Chat ID: <code>{chat_id}</code>\n"
         f"Topic ID: <code>{thread_id}</code>\n"
@@ -380,20 +380,20 @@ async def nicks_status(message: Message, db: Database, config: Config, telethon:
 @router.message(Command("import_nick"))
 async def import_old_nick(message: Message, db: Database, config: Config):
     if not is_admin(message.from_user.id, config):
-        await message.answer("Недостаточно прав.")
+        await topic_answer(message, "Недостаточно прав.")
         return
     source = message.reply_to_message
     if not source:
-        await message.answer("Ответьте командой /import_nick на старое сообщение игрока с его ником.")
+        await topic_answer(message, "Ответьте командой /import_nick на старое сообщение игрока с его ником.")
         return
     outcome = await sync_nick_message(source, db)
     if not outcome.handled:
-        await message.answer("Это сообщение не из настроенной темы «Ники игроков».")
+        await topic_answer(message, "Это сообщение не из настроенной темы «Ники игроков».")
     elif outcome.error:
-        await message.answer(f"⚠️ {outcome.error}")
+        await topic_answer(message, f"⚠️ {outcome.error}")
     else:
         nickname = extract_nickname(source.text or source.caption)
-        await message.answer(outcome.notice or f"✅ Импортирован ник: <b>{escape(nickname or '—')}</b>")
+        await topic_answer(message, outcome.notice or f"✅ Импортирован ник: <b>{escape(nickname or '—')}</b>")
 
 
 @router.edited_message()
@@ -428,13 +428,13 @@ async def start(
     # for secrets in chat, issue a short-lived browser link.
     if payload == "telethon":
         if not can_manage_telethon(message.from_user.id, config):
-            await message.answer("Настройка Telethon доступна только владельцу бота.")
+            await topic_answer(message, "Настройка Telethon доступна только владельцу бота.")
             return
         if message.chat.type != "private":
-            await message.answer("Откройте личный чат с ботом и нажмите /start.")
+            await topic_answer(message, "Откройте личный чат с ботом и нажмите /start.")
             return
         url = telethon_web.create_login_url(message.from_user.id)
-        await message.answer(
+        await topic_answer(message, 
             "🔐 <b>Telethon</b>\n\nСекретные данные теперь вводятся в отдельном браузерном окне.",
             reply_markup=InlineKeyboardMarkup(
                 inline_keyboard=[[InlineKeyboardButton(text="🪟 Открыть окно авторизации", url=url)]]
@@ -445,7 +445,7 @@ async def start(
     await state.clear()
     player = await db.get_player(message.from_user.id)
     name = f"<b>{escape(player.game_nickname)}</b>" if player else "участник"
-    await message.answer(
+    await topic_answer(message, 
         f"🎮 Привет, {name}.\n\n"
         "Рабочие функции XZONA Bot выполняются <b>внутри тем игровой группы</b>.\n"
         "• Ник и должность — в теме «Ники игроков»\n"
@@ -457,14 +457,14 @@ async def start(
 
 @router.message(Command("myid"))
 async def my_id(message: Message):
-    await message.answer(f"Ваш Telegram ID: <code>{message.from_user.id}</code>")
+    await topic_answer(message, f"Ваш Telegram ID: <code>{message.from_user.id}</code>")
 
 
 @router.message(Command("my_role"))
 async def my_role(message: Message, db: Database):
     player = await db.get_player(message.from_user.id)
     if not player:
-        await message.answer("Ваш профиль ещё не найден. Напишите ник и должность в теме «Ники игроков».")
+        await topic_answer(message, "Ваш профиль ещё не найден. Напишите ник и должность в теме «Ники игроков».")
         return
     pending = await db.get_pending_role_request_for_user(message.from_user.id)
     current = position_display(player.position_code, player.faction_code)
@@ -476,7 +476,7 @@ async def my_role(message: Message, db: Database):
         lines.append(f"⏳ Ожидает подтверждения: <b>{escape(pending.requested_label)}</b>")
     elif player.position_status != "approved":
         lines.append("⚠️ Должность ещё не назначена.")
-    await message.answer("\n".join(lines))
+    await topic_answer(message, "\n".join(lines))
 
 
 @router.message(Command("cancel"))
@@ -485,19 +485,19 @@ async def cancel_any(message: Message, state: FSMContext, telethon: TelethonMana
     if can_manage_telethon(message.from_user.id, config):
         await telethon.cancel_pending()
     if message.chat.type == "private":
-        await message.answer("❌ Операция отменена.", reply_markup=main_menu(is_admin(message.from_user.id, config)))
+        await topic_answer(message, "❌ Операция отменена.", reply_markup=main_menu(is_admin(message.from_user.id, config)))
     else:
-        await message.answer("❌ Операция отменена.")
+        await topic_answer(message, "❌ Операция отменена.")
 
 
 @router.message(RegisterPlayer.nickname)
 async def register_nickname(message: Message, db: Database, state: FSMContext, config: Config):
     nickname = (message.text or "").strip()
     if len(nickname) < 2 or len(nickname) > 40:
-        await message.answer("Ник должен быть длиной от 2 до 40 символов. Попробуйте ещё раз:")
+        await topic_answer(message, "Ник должен быть длиной от 2 до 40 символов. Попробуйте ещё раз:")
         return
     if await db.nickname_exists_for_other(message.from_user.id, nickname):
-        await message.answer("Такой игровой ник уже зарегистрирован. Введите другой:")
+        await topic_answer(message, "Такой игровой ник уже зарегистрирован. Введите другой:")
         return
     data = await state.get_data()
     await db.upsert_player(
@@ -508,12 +508,12 @@ async def register_nickname(message: Message, db: Database, state: FSMContext, c
     )
     await state.clear()
     if data.get("after_register") == "market":
-        await message.answer(
+        await topic_answer(message, 
             f"✅ Ник сохранён: <b>{escape(nickname)}</b>\n\n🛒 <b>Рынок ГП</b>",
             reply_markup=market_menu(is_admin(message.from_user.id, config)),
         )
     else:
-        await message.answer(
+        await topic_answer(message, 
             f"✅ Ник сохранён: <b>{escape(nickname)}</b>",
             reply_markup=main_menu(is_admin(message.from_user.id, config)),
         )
@@ -524,10 +524,10 @@ async def my_profile(message: Message, db: Database, state: FSMContext):
     player = await db.get_player(message.from_user.id)
     if not player:
         await state.set_state(RegisterPlayer.nickname)
-        await message.answer("👤 Введите ваш игровой ник:")
+        await topic_answer(message, "👤 Введите ваш игровой ник:")
         return
     items = await db.list_player_items(message.from_user.id)
-    await message.answer(
+    await topic_answer(message, 
         f"👤 <b>{escape(player.game_nickname)}</b>\n"
         f"Telegram: @{escape(player.username) if player.username else '—'}\n"
         f"🎖 Должность: <b>{escape(position_display(player.position_code, player.faction_code))}</b>"
@@ -540,7 +540,7 @@ async def my_profile(message: Message, db: Database, state: FSMContext):
 @router.message(Command("nickname"))
 async def change_nickname(message: Message, state: FSMContext):
     await state.set_state(RegisterPlayer.nickname)
-    await message.answer("Введите новый игровой ник:")
+    await topic_answer(message, "Введите новый игровой ник:")
 
 
 # ---------------------------------------------------------------------------
@@ -551,9 +551,9 @@ async def change_nickname(message: Message, state: FSMContext):
 @router.message(Command("admin"))
 async def admin_home_message(message: Message, config: Config):
     if not is_admin(message.from_user.id, config):
-        await message.answer("Недостаточно прав.")
+        await topic_answer(message, "Недостаточно прав.")
         return
-    await message.answer("⚙️ <b>Администрирование</b>", reply_markup=admin_menu())
+    await topic_answer(message, "⚙️ <b>Администрирование</b>", reply_markup=admin_menu())
 
 
 @router.callback_query(F.data == "admin:home")
@@ -599,7 +599,7 @@ async def telethon_setup_start(
         return
     await state.clear()
     url = telethon_web.create_login_url(callback.from_user.id)
-    await callback.message.answer(
+    await topic_answer(callback.message, 
         "🔐 <b>Подключение Telethon</b>\n\nВведите API ID/API HASH, телефон, код и 2FA в браузерном окне:",
         reply_markup=InlineKeyboardMarkup(
             inline_keyboard=[[InlineKeyboardButton(text="🪟 Открыть окно авторизации", url=url)]]
@@ -614,12 +614,12 @@ async def telethon_api_id(message: Message, state: FSMContext, config: Config):
         return
     raw = (message.text or "").strip()
     if not raw.isdigit():
-        await message.answer("API ID должен состоять из цифр.")
+        await topic_answer(message, "API ID должен состоять из цифр.")
         return
     await state.update_data(telethon_api_id=int(raw))
     await safe_delete(message)
     await state.set_state(TelethonSetup.api_hash)
-    await message.answer("2/4. Введите <b>API HASH</b>:")
+    await topic_answer(message, "2/4. Введите <b>API HASH</b>:")
 
 
 @router.message(TelethonSetup.api_hash)
@@ -628,12 +628,12 @@ async def telethon_api_hash(message: Message, state: FSMContext, config: Config)
         return
     api_hash = (message.text or "").strip()
     if len(api_hash) < 20:
-        await message.answer("API HASH выглядит слишком коротким. Проверьте значение.")
+        await topic_answer(message, "API HASH выглядит слишком коротким. Проверьте значение.")
         return
     await state.update_data(telethon_api_hash=api_hash)
     await safe_delete(message)
     await state.set_state(TelethonSetup.phone)
-    await message.answer("3/4. Введите номер Telegram-аккаунта в международном формате, например <code>+79991234567</code>:")
+    await topic_answer(message, "3/4. Введите номер Telegram-аккаунта в международном формате, например <code>+79991234567</code>:")
 
 
 @router.message(TelethonSetup.phone)
@@ -642,11 +642,11 @@ async def telethon_phone(message: Message, state: FSMContext, config: Config, te
         return
     phone = re.sub(r"[\s()\-]", "", (message.text or "").strip())
     if not re.fullmatch(r"\+\d{7,15}", phone):
-        await message.answer("Введите номер в формате +79991234567.")
+        await topic_answer(message, "Введите номер в формате +79991234567.")
         return
     data = await state.get_data()
     await safe_delete(message)
-    wait = await message.answer("⏳ Запрашиваю код у Telegram…")
+    wait = await topic_answer(message, "⏳ Запрашиваю код у Telegram…")
     try:
         await telethon.begin_login(data["telethon_api_id"], data["telethon_api_hash"], phone)
     except Exception as exc:
@@ -668,22 +668,22 @@ async def telethon_code(message: Message, state: FSMContext, config: Config, tel
     code = re.sub(r"\D", "", (message.text or ""))
     await safe_delete(message)
     if not 3 <= len(code) <= 8:
-        await message.answer("Код выглядит неверно. Введите только цифры из сообщения Telegram.")
+        await topic_answer(message, "Код выглядит неверно. Введите только цифры из сообщения Telegram.")
         return
     try:
         result = await telethon.submit_code(code)
     except Exception as exc:
-        await message.answer(f"❌ {escape(str(exc)[:500])}")
+        await topic_answer(message, f"❌ {escape(str(exc)[:500])}")
         return
     if result == "password":
         await state.set_state(TelethonSetup.password)
-        await message.answer(
+        await topic_answer(message, 
             "🔑 На аккаунте включена двухэтапная аутентификация. Введите облачный пароль Telegram.\n"
             "Пароль не сохраняется и сообщение будет удалено."
         )
         return
     await state.clear()
-    await message.answer("✅ <b>Telethon подключён.</b> Теперь можно импортировать старые ники.")
+    await topic_answer(message, "✅ <b>Telethon подключён.</b> Теперь можно импортировать старые ники.")
 
 
 @router.message(TelethonSetup.password)
@@ -695,10 +695,10 @@ async def telethon_password(message: Message, state: FSMContext, config: Config,
     try:
         await telethon.submit_password(password)
     except Exception as exc:
-        await message.answer(f"❌ Не удалось войти: <code>{escape(str(exc)[:500])}</code>")
+        await topic_answer(message, f"❌ Не удалось войти: <code>{escape(str(exc)[:500])}</code>")
         return
     await state.clear()
-    await message.answer("✅ <b>Telethon подключён.</b> Облачный пароль не сохранён.")
+    await topic_answer(message, "✅ <b>Telethon подключён.</b> Облачный пароль не сохранён.")
 
 
 @router.callback_query(F.data == "telethon:disconnect")
@@ -778,10 +778,10 @@ async def market_home(message: Message, db: Database, state: FSMContext, config:
     topic = await db.get_market_topic()
     if message.chat.type == "private":
         await state.clear()
-        await message.answer("🛒 Заказы теперь оформляются прямо в настроенной теме «Рынок ГП» игровой группы.")
+        await topic_answer(message, "🛒 Заказы теперь оформляются прямо в настроенной теме «Рынок ГП» игровой группы.")
         return
     if topic and message.is_topic_message and (message.chat.id, message.message_thread_id) == topic:
-        await message.answer("🛒 <b>Рынок ГП</b>\n\nИспользуйте панель темы для создания заказа.")
+        await topic_answer(message, "🛒 <b>Рынок ГП</b>\n\nИспользуйте панель темы для создания заказа.")
         return
 
 
@@ -796,25 +796,25 @@ async def market_new(callback: CallbackQuery, db: Database, state: FSMContext, c
 async def market_item_name(message: Message, state: FSMContext):
     name = (message.text or "").strip()
     if not 1 <= len(name) <= 80:
-        await message.answer("Название должно быть от 1 до 80 символов.")
+        await topic_answer(message, "Название должно быть от 1 до 80 символов.")
         return
     await state.update_data(market_pending_name=name)
     await state.set_state(MarketOrder.quantity)
-    await message.answer(f"🎒 <b>{escape(name)}</b>\n\n🔢 Введите количество:")
+    await topic_answer(message, f"🎒 <b>{escape(name)}</b>\n\n🔢 Введите количество:")
 
 
 @router.message(MarketOrder.quantity)
 async def market_item_quantity(message: Message, state: FSMContext):
     raw = (message.text or "").strip()
     if not raw.isdigit() or not 1 <= int(raw) <= 9999:
-        await message.answer("Введите целое количество от 1 до 9999.")
+        await topic_answer(message, "Введите целое количество от 1 до 9999.")
         return
     data = await state.get_data()
     items = list(data.get("market_items", []))
     items.append({"name": data["market_pending_name"], "quantity": int(raw)})
     await state.update_data(market_items=items)
     await state.set_state(None)
-    await message.answer(
+    await topic_answer(message, 
         cart_text(items, data.get("market_comment")),
         reply_markup=market_cart_keyboard(bool(items)),
     )
@@ -826,14 +826,14 @@ async def market_add_more(callback: CallbackQuery, state: FSMContext):
     if "market_items" not in data:
         await state.update_data(market_items=[], market_comment=None)
     await state.set_state(MarketOrder.item_name)
-    await callback.message.answer("🎒 Введите название следующей позиции:")
+    await topic_answer(callback.message, "🎒 Введите название следующей позиции:")
     await callback.answer()
 
 
 @router.callback_query(F.data == "market:comment")
 async def market_comment_start(callback: CallbackQuery, state: FSMContext):
     await state.set_state(MarketOrder.comment)
-    await callback.message.answer("📝 Введите комментарий к заказу:", reply_markup=market_comment_skip_keyboard())
+    await topic_answer(callback.message, "📝 Введите комментарий к заказу:", reply_markup=market_comment_skip_keyboard())
     await callback.answer()
 
 
@@ -841,13 +841,13 @@ async def market_comment_start(callback: CallbackQuery, state: FSMContext):
 async def market_comment_save(message: Message, state: FSMContext):
     comment = (message.text or "").strip()
     if len(comment) > 500:
-        await message.answer("Комментарий слишком длинный. Максимум 500 символов.")
+        await topic_answer(message, "Комментарий слишком длинный. Максимум 500 символов.")
         return
     data = await state.get_data()
     await state.update_data(market_comment=comment or None)
     await state.set_state(None)
     items = data.get("market_items", [])
-    await message.answer(cart_text(items, comment or None), reply_markup=market_cart_keyboard(bool(items)))
+    await topic_answer(message, cart_text(items, comment or None), reply_markup=market_cart_keyboard(bool(items)))
 
 
 @router.callback_query(F.data == "market:comment_skip")
@@ -856,7 +856,7 @@ async def market_comment_skip(callback: CallbackQuery, state: FSMContext):
     await state.update_data(market_comment=None)
     await state.set_state(None)
     items = data.get("market_items", [])
-    await callback.message.answer(cart_text(items, None), reply_markup=market_cart_keyboard(bool(items)))
+    await topic_answer(callback.message, cart_text(items, None), reply_markup=market_cart_keyboard(bool(items)))
     await callback.answer()
 
 
@@ -988,11 +988,11 @@ async def market_merchant_save(message: Message, db: Database, state: FSMContext
         raw = "@" + raw.split("https://t.me/", 1)[1].strip("/").split("/", 1)[0]
     valid = bool(re.fullmatch(r"-?\d+", raw) or re.fullmatch(r"@[A-Za-z0-9_]{5,32}", raw))
     if not valid:
-        await message.answer("Введите @username или числовой Telegram ID.")
+        await topic_answer(message, "Введите @username или числовой Telegram ID.")
         return
     await db.set_market_merchant_target(raw)
     await state.clear()
-    await message.answer(f"✅ Торговец ГП настроен: <code>{escape(raw)}</code>")
+    await topic_answer(message, f"✅ Торговец ГП настроен: <code>{escape(raw)}</code>")
 
 
 @router.callback_query(F.data == "market_settings:test")
@@ -1013,9 +1013,9 @@ async def market_test(callback: CallbackQuery, db: Database, config: Config, bot
             "🧪 <b>Тест связи XZONA Group Bot</b>\n\nЕсли вы получили это сообщение, доставка заказов Рынка ГП настроена правильно.",
         )
     except Exception as exc:
-        await callback.message.answer(f"❌ Тест не прошёл: <code>{escape(str(exc)[:700])}</code>")
+        await topic_answer(callback.message, f"❌ Тест не прошёл: <code>{escape(str(exc)[:700])}</code>")
         return
-    await callback.message.answer(f"✅ Тестовое сообщение отправлено через {'Telegram Bot' if method == 'bot' else 'Telethon'}.")
+    await topic_answer(callback.message, f"✅ Тестовое сообщение отправлено через {'Telegram Bot' if method == 'bot' else 'Telethon'}.")
 
 
 # ---------------------------------------------------------------------------
@@ -1025,10 +1025,10 @@ async def market_test(callback: CallbackQuery, db: Database, config: Config, bot
 @router.message(F.text == "📦 Хранилище")
 async def storage(message: Message, db: Database, config: Config):
     if not await has_permission(message.from_user.id, "storage.view", db, config):
-        await message.answer("⛔ Этот раздел недоступен для вашей должности.")
+        await topic_answer(message, "⛔ Этот раздел недоступен для вашей должности.")
         return
     can_manage = await has_permission(message.from_user.id, "storage.manage", db, config)
-    await message.answer("📦 <b>Хранилище</b>", reply_markup=storage_menu(can_manage))
+    await topic_answer(message, "📦 <b>Хранилище</b>", reply_markup=storage_menu(can_manage))
 
 
 @router.callback_query(F.data == "storage:add")
@@ -1099,22 +1099,22 @@ async def add_recent_name(callback: CallbackQuery, state: FSMContext):
 async def add_name(message: Message, state: FSMContext):
     name = (message.text or "").strip()
     if len(name) < 1 or len(name) > 80:
-        await message.answer("Название должно быть от 1 до 80 символов.")
+        await topic_answer(message, "Название должно быть от 1 до 80 символов.")
         return
     await state.update_data(item_name=name)
     await state.set_state(AddItem.quantity)
-    await message.answer("🔢 Введите количество:")
+    await topic_answer(message, "🔢 Введите количество:")
 
 
 @router.message(AddItem.quantity)
 async def add_quantity(message: Message, state: FSMContext):
     raw = (message.text or "").strip()
     if not raw.isdigit() or not 1 <= int(raw) <= 9999:
-        await message.answer("Введите целое количество от 1 до 9999:")
+        await topic_answer(message, "Введите целое количество от 1 до 9999:")
         return
     await state.update_data(quantity=int(raw))
     await state.set_state(AddItem.comment)
-    await message.answer("📝 Добавьте комментарий или пропустите:", reply_markup=skip_comment_keyboard())
+    await topic_answer(message, "📝 Добавьте комментарий или пропустите:", reply_markup=skip_comment_keyboard())
 
 
 @router.callback_query(AddItem.comment, F.data == "add:skip_comment")
@@ -1129,7 +1129,7 @@ async def add_skip_comment(callback: CallbackQuery, state: FSMContext):
 async def add_comment(message: Message, state: FSMContext):
     comment = (message.text or "").strip()
     if len(comment) > 500:
-        await message.answer("Комментарий слишком длинный. Максимум 500 символов.")
+        await topic_answer(message, "Комментарий слишком длинный. Максимум 500 символов.")
         return
     await state.update_data(comment=comment or None)
     await state.set_state(AddItem.confirm)
@@ -1138,7 +1138,7 @@ async def add_comment(message: Message, state: FSMContext):
 
 async def show_add_confirm(message: Message, state: FSMContext):
     data = await state.get_data()
-    await message.answer(
+    await topic_answer(message, 
         "<b>📦 Новый предмет</b>\n\n"
         f"👤 Владелец: <b>{escape(data['player_nickname'])}</b>\n"
         f"🎒 Предмет: <b>{escape(data['item_name'])}</b>\n"
@@ -1196,7 +1196,7 @@ async def storage_list(callback: CallbackQuery, db: Database, config: Config):
 @router.message(F.text.regexp(r"^/item_(\d+)$"))
 async def item_command(message: Message, db: Database, config: Config):
     if not await has_permission(message.from_user.id, "storage.view", db, config):
-        await message.answer("⛔ Этот раздел недоступен для вашей должности.")
+        await topic_answer(message, "⛔ Этот раздел недоступен для вашей должности.")
         return
     try:
         item_id = int((message.text or "").split("_", 1)[1])
@@ -1204,9 +1204,9 @@ async def item_command(message: Message, db: Database, config: Config):
         return
     item = await db.get_storage_item(item_id)
     if not item:
-        await message.answer("Предмет не найден.")
+        await topic_answer(message, "Предмет не найден.")
         return
-    await message.answer(item_text(item), reply_markup=item_keyboard(item.id, await has_permission(message.from_user.id, "storage.manage", db, config), item.status == "issued"))
+    await topic_answer(message, item_text(item), reply_markup=item_keyboard(item.id, await has_permission(message.from_user.id, "storage.manage", db, config), item.status == "issued"))
 
 
 @router.callback_query(F.data.startswith("item:view:"))
@@ -1289,7 +1289,7 @@ async def edit_name_start(callback: CallbackQuery, db: Database, state: FSMConte
         return
     await state.set_state(EditItem.name)
     await state.update_data(edit_item_id=int(callback.data.rsplit(":", 1)[1]))
-    await callback.message.answer("✏️ Введите новое название предмета:")
+    await topic_answer(callback.message, "✏️ Введите новое название предмета:")
     await callback.answer()
 
 
@@ -1297,13 +1297,13 @@ async def edit_name_start(callback: CallbackQuery, db: Database, state: FSMConte
 async def edit_name_save(message: Message, db: Database, state: FSMContext):
     name = (message.text or "").strip()
     if not 1 <= len(name) <= 80:
-        await message.answer("Название должно быть от 1 до 80 символов.")
+        await topic_answer(message, "Название должно быть от 1 до 80 символов.")
         return
     data = await state.get_data()
     ok = await db.update_item_name(data["edit_item_id"], name)
     await state.clear()
     item = await db.get_storage_item(data["edit_item_id"])
-    await message.answer("✅ Изменено.\n\n" + item_text(item) if ok else "Не удалось изменить.")
+    await topic_answer(message, "✅ Изменено.\n\n" + item_text(item) if ok else "Не удалось изменить.")
 
 
 @router.callback_query(F.data.startswith("item:edit_qty:"))
@@ -1313,7 +1313,7 @@ async def edit_qty_start(callback: CallbackQuery, db: Database, state: FSMContex
         return
     await state.set_state(EditItem.quantity)
     await state.update_data(edit_item_id=int(callback.data.rsplit(":", 1)[1]))
-    await callback.message.answer("🔢 Введите новое количество:")
+    await topic_answer(callback.message, "🔢 Введите новое количество:")
     await callback.answer()
 
 
@@ -1321,13 +1321,13 @@ async def edit_qty_start(callback: CallbackQuery, db: Database, state: FSMContex
 async def edit_qty_save(message: Message, db: Database, state: FSMContext):
     raw = (message.text or "").strip()
     if not raw.isdigit() or not 1 <= int(raw) <= 9999:
-        await message.answer("Введите целое число от 1 до 9999.")
+        await topic_answer(message, "Введите целое число от 1 до 9999.")
         return
     data = await state.get_data()
     ok = await db.update_item_quantity(data["edit_item_id"], int(raw))
     await state.clear()
     item = await db.get_storage_item(data["edit_item_id"])
-    await message.answer("✅ Изменено.\n\n" + item_text(item) if ok else "Не удалось изменить.")
+    await topic_answer(message, "✅ Изменено.\n\n" + item_text(item) if ok else "Не удалось изменить.")
 
 
 @router.callback_query(F.data.startswith("item:edit_comment:"))
@@ -1337,7 +1337,7 @@ async def edit_comment_start(callback: CallbackQuery, db: Database, state: FSMCo
         return
     await state.set_state(EditItem.comment)
     await state.update_data(edit_item_id=int(callback.data.rsplit(":", 1)[1]))
-    await callback.message.answer("📝 Введите новый комментарий. Отправьте <code>-</code>, чтобы очистить:")
+    await topic_answer(callback.message, "📝 Введите новый комментарий. Отправьте <code>-</code>, чтобы очистить:")
     await callback.answer()
 
 
@@ -1345,14 +1345,14 @@ async def edit_comment_start(callback: CallbackQuery, db: Database, state: FSMCo
 async def edit_comment_save(message: Message, db: Database, state: FSMContext):
     text = (message.text or "").strip()
     if len(text) > 500:
-        await message.answer("Максимум 500 символов.")
+        await topic_answer(message, "Максимум 500 символов.")
         return
     data = await state.get_data()
     comment = None if text == "-" else text
     ok = await db.update_item_comment(data["edit_item_id"], comment)
     await state.clear()
     item = await db.get_storage_item(data["edit_item_id"])
-    await message.answer("✅ Изменено.\n\n" + item_text(item) if ok else "Не удалось изменить.")
+    await topic_answer(message, "✅ Изменено.\n\n" + item_text(item) if ok else "Не удалось изменить.")
 
 
 # ---------------------------------------------------------------------------
@@ -1362,17 +1362,17 @@ async def edit_comment_save(message: Message, db: Database, state: FSMContext):
 @router.message(F.text == "👥 Игроки")
 async def players(message: Message, db: Database, config: Config):
     if not is_admin(message.from_user.id, config):
-        await message.answer("👥 Этот раздел доступен администраторам.")
+        await topic_answer(message, "👥 Этот раздел доступен администраторам.")
         return
     rows = await db.list_players(limit=50)
     if not rows:
-        await message.answer("Игроков пока нет.")
+        await topic_answer(message, "Игроков пока нет.")
         return
     lines = [f"👥 <b>Игроки ({len(rows)})</b>", ""]
     for p in rows:
         u = f"@{escape(p.username)}" if p.username else "без username"
         lines.append(f"• <b>{escape(p.game_nickname)}</b> — {u}")
-    await message.answer("\n".join(lines))
+    await topic_answer(message, "\n".join(lines))
 
 
 @router.message(F.text == "ℹ️ Помощь")
@@ -1388,7 +1388,7 @@ async def help_message(message: Message, config: Config):
     )
     if is_admin(message.from_user.id, config):
         text += "\n\n🛡 Вам доступно меню ⚙️ Администрирование."
-    await message.answer(text)
+    await topic_answer(message, text)
 
 
 @router.message()
@@ -1403,4 +1403,4 @@ async def fallback(message: Message, db: Database, config: Config):
                 await publish_role_request_card(message.bot, db, outcome.request_id)
         return
     if message.chat.type == "private":
-        await message.answer("Рабочее управление выполняется внутри тематических разделов игровой группы. Для справки используйте /help.")
+        await topic_answer(message, "Рабочее управление выполняется внутри тематических разделов игровой группы. Для справки используйте /help.")
