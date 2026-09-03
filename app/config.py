@@ -13,6 +13,7 @@ load_dotenv()
 class Config:
     bot_token: str
     admin_ids: set[int]
+    owner_id: int | None
     db_path: Path
 
 
@@ -28,5 +29,10 @@ def load_config() -> Config:
         if part.strip().isdigit()
     }
 
+    owner_raw = os.getenv("OWNER_ID", "").strip()
+    owner_id = int(owner_raw) if owner_raw.isdigit() else None
+    if owner_id is not None:
+        admin_ids.add(owner_id)
+
     db_path = Path(os.getenv("DB_PATH", "bot.db")).expanduser()
-    return Config(bot_token=token, admin_ids=admin_ids, db_path=db_path)
+    return Config(bot_token=token, admin_ids=admin_ids, owner_id=owner_id, db_path=db_path)
