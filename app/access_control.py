@@ -64,3 +64,39 @@ class ExternalMemberTopicMiddleware(BaseMiddleware):
             # Missing delete rights should never crash the bot.
             pass
         return None
+
+class TopicMirrorMiddleware(BaseMiddleware):
+    """Copy new messages from configured source topics into News/Info destinations.
+
+    The bot must be present in the source chat and receive its messages. This is
+    intentionally independent from Telethon so continuous mirroring stays simple
+    and reliable on hosting.
+    """
+
+    async def __call__(
+        self,
+        handler: Callable[[TelegramObject, dict[str, Any]], Awaitable[Any]],
+        event: TelegramObject,
+        data: dict[str, Any],
+    ) -> Any:
+        if isinstance(event, Message) and event.chat.type in {"group", "supergroup"} and event.from_user and not event.from_user.is_bot:
+            text = (event.text or event.caption or "").strip()
+            if not text.startswith("/"):
+                db: Database | None = data.get("db")
+                bot = data.get("bot")
+                if db is not None and bot is not None:
+                    sources = await db.mirror_sources_for(event.chat.id, int(event.message_thread_id or 0))
+                    for src in sources:
+                        if src["dest_chat_id"] == event.chat.id and int(src["dest_thread_id"] or 0) == int(event.message_thread_id or 0):
+                            continue
+                        try:
+                            kwargs = {"message_thread_id": int(src["dest_thread_id"])} if int(src["dest_thread_id"] or 0) else {}
+                            await bot.copy_message(
+                                chat_id=int(src["dest_chat_id"]),
+                                from_chat_id=event.chat.id,
+                                message_id=event.message_id,
+                                **kwargs,
+                            )
+                        except Exception:
+                            pass
+        return await handler(event, data)

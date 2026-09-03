@@ -52,6 +52,7 @@ class TelethonWebAuth:
 
     async def start(self) -> None:
         app = web.Application(client_max_size=128 * 1024)
+        app.router.add_get("/", self._root)
         app.router.add_get("/health", self._health)
         app.router.add_get("/telethon", self._show)
         app.router.add_post("/telethon/start", self._start_login)
@@ -99,9 +100,19 @@ class TelethonWebAuth:
             return None
         return token, ticket
 
+    async def _root(self, request: web.Request) -> web.Response:
+        connected = await self.telethon.is_connected()
+        body = self._shell(
+            "<h1>🤖 XZONA Group Bot</h1>"
+            "<p class='ok'>Сервис запущен.</p>"
+            f"<p>Telethon: <b>{'подключён' if connected else 'не подключён'}</b></p>"
+            "<p class='hint'>Авторизация Telethon открывается только по одноразовой ссылке из /admin в Telegram.</p>"
+        )
+        return self._html(body)
+
     async def _health(self, request: web.Request) -> web.Response:
         connected = await self.telethon.is_connected()
-        return web.json_response({"ok": True, "telethon_connected": connected})
+        return web.json_response({"ok": True, "ready": True, "telethon_connected": connected})
 
     async def _show(self, request: web.Request) -> web.Response:
         loaded = self._ticket(request)

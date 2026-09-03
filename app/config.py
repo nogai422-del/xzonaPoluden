@@ -19,6 +19,22 @@ class Config:
     telethon_web_port: int
     telethon_web_public_url: str
     telethon_web_ticket_ttl: int
+    announce_on_start: bool
+    temp_message_ttl: int
+
+
+def _public_url(port: int) -> str:
+    explicit = os.getenv("TELETHON_WEB_PUBLIC_URL", "").strip().rstrip("/")
+    if explicit:
+        return explicit
+    # Bothost commonly exposes a project domain through an environment variable.
+    # Users may also define DOMAIN manually if their project does not inject it.
+    domain = os.getenv("DOMAIN", "").strip().strip("/")
+    if domain:
+        if domain.startswith("http://") or domain.startswith("https://"):
+            return domain.rstrip("/")
+        return f"https://{domain}"
+    return f"http://127.0.0.1:{port}"
 
 
 def load_config() -> Config:
@@ -27,26 +43,35 @@ def load_config() -> Config:
         raise RuntimeError("BOT_TOKEN is not set. Copy .env.example to .env and fill it in.")
 
     raw_admins = os.getenv("ADMIN_IDS", "")
-    admin_ids = {
-        int(part.strip())
-        for part in raw_admins.split(",")
-        if part.strip().isdigit()
-    }
+    admin_ids = {int(part.strip()) for part in raw_admins.split(",") if part.strip().isdigit()}
 
     owner_raw = os.getenv("OWNER_ID", "").strip()
     owner_id = int(owner_raw) if owner_raw.isdigit() else None
     if owner_id is not None:
         admin_ids.add(owner_id)
 
-    db_path = Path(os.getenv("DB_PATH", "bot.db")).expanduser()
+    raw_db = os.getenv("DB_PATH", "").strip()
+    if raw_db:
+        db_path = Path(raw_db).expanduser()
+    elif Path("/app/data").is_dir():
+        db_path = Path("/app/data/bot.db")
+    else:
+        db_path = Path("bot.db")
+    db_path.parent.mkdir(parents=True, exist_ok=True)
 
-    web_host = os.getenv("TELETHON_WEB_HOST", "127.0.0.1").strip() or "127.0.0.1"
-    raw_port = os.getenv("TELETHON_WEB_PORT", "8088").strip()
+    platform_port = os.getenv("PORT", "").strip()
+    raw_port = platform_port or os.getenv("TELETHON_WEB_PORT", "8088").strip()
     web_port = int(raw_port) if raw_port.isdigit() else 8088
-    default_public = f"http://127.0.0.1:{web_port}"
-    web_public_url = os.getenv("TELETHON_WEB_PUBLIC_URL", default_public).strip().rstrip("/") or default_public
+    default_host = "0.0.0.0" if platform_port else "127.0.0.1"
+    web_host = os.getenv("TELETHON_WEB_HOST", default_host).strip() or default_host
+    web_public_url = _public_url(web_port)
+
     raw_ttl = os.getenv("TELETHON_WEB_TICKET_TTL", "900").strip()
     web_ticket_ttl = int(raw_ttl) if raw_ttl.isdigit() else 900
+    announce_on_start = os.getenv("ANNOUNCE_ON_START", "1").strip().lower() not in {"0","false","no","off"}
+    raw_temp_ttl = os.getenv("TEMP_MESSAGE_TTL", "90").strip()
+    temp_message_ttl = int(raw_temp_ttl) if raw_temp_ttl.isdigit() else 180
+    temp_message_ttl = max(30, min(temp_message_ttl, 3600))
 
     return Config(
         bot_token=token,
@@ -57,4 +82,6 @@ def load_config() -> Config:
         telethon_web_port=web_port,
         telethon_web_public_url=web_public_url,
         telethon_web_ticket_ttl=web_ticket_ttl,
+        announce_on_start=announce_on_start,
+        temp_message_ttl=temp_message_ttl,
     )

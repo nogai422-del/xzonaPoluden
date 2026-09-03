@@ -12,6 +12,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from .config import Config
+from .housekeeping import temp_answer
 from .db import Database, MarketOrder as DbMarketOrder, MarketOrderItem, StorageItem
 from .keyboards import (
     admin_menu,
@@ -348,9 +349,9 @@ async def import_old_nick(message: Message, db: Database, config: Config):
 async def sync_edited_nickname(message: Message, db: Database):
     outcome = await sync_nick_message(message, db)
     if outcome.handled and outcome.error:
-        await message.answer(f"⚠️ {outcome.error}")
+        await temp_answer(message, f"⚠️ {outcome.error}", ttl=90)
     elif outcome.handled and outcome.notice:
-        await message.answer(outcome.notice)
+        await temp_answer(message, outcome.notice, ttl=45)
 
 
 # ---------------------------------------------------------------------------
@@ -1333,9 +1334,9 @@ async def fallback(message: Message, db: Database, config: Config):
     outcome = await sync_nick_message(message, db)
     if outcome.handled:
         if outcome.error:
-            await message.answer(f"⚠️ {outcome.error}")
+            await temp_answer(message, f"⚠️ {outcome.error}", ttl=90)
         elif outcome.notice:
-            await message.answer(outcome.notice)
+            await temp_answer(message, outcome.notice, ttl=45)
         return
     if message.chat.type == "private":
         await message.answer("Рабочее управление выполняется внутри тематических разделов игровой группы. Для справки используйте /help.")

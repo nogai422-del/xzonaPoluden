@@ -307,6 +307,7 @@ def group_admin_menu() -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="👥 Ники игроков", callback_data="gadmin:nicks")],
             [InlineKeyboardButton(text="🎖 Роли и доступ", callback_data="gadmin:roles")],
             [InlineKeyboardButton(text="🛒 Рынок ГП", callback_data="gadmin:market")],
+            [InlineKeyboardButton(text="🧩 Разделы и запуск", callback_data="gadmin:system")],
             [InlineKeyboardButton(text="🔐 Telethon", callback_data="gadmin:telethon")],
         ]
     )

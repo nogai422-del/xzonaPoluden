@@ -170,6 +170,28 @@ async def safe_delete(message: Message) -> None:
         pass
 
 
+async def flow_edit_from_message(
+    message: Message, state: FSMContext, text: str, *, reply_markup: InlineKeyboardMarkup | None = None
+) -> Message | None:
+    """Keep one bot workflow message per user flow instead of stacking prompts."""
+    data = await state.get_data()
+    flow_message_id = data.get("flow_message_id")
+    if flow_message_id:
+        try:
+            await message.bot.edit_message_text(
+                chat_id=message.chat.id,
+                message_id=int(flow_message_id),
+                text=text,
+                reply_markup=reply_markup,
+            )
+            return None
+        except Exception:
+            pass
+    sent = await message.answer(text, reply_markup=reply_markup)
+    await state.update_data(flow_message_id=sent.message_id)
+    return sent
+
+
 def topic_tuple_from_message(message: Message) -> tuple[int, int] | None:
     if not message.is_topic_message or message.message_thread_id is None:
         return None
@@ -270,35 +292,35 @@ async def send_merchant_notification(
 @router.message(Command("set_general_topic"), F.chat.type.in_(GROUP_TYPES))
 async def set_general_topic_group(message: Message, db: Database, config: Config):
     if not message.from_user or not await can_manage_roles(message.from_user.id, db, config):
-        await message.answer("Недостаточно прав.")
+        await temp_answer(message, "Недостаточно прав.", ttl=45)
         return
-    # General is normally a forum topic. If Telegram reports no thread id, store 0.
     thread_id = int(message.message_thread_id or 0)
     await db.set_general_topic(message.chat.id, thread_id)
-    await message.answer(
-        "✅ Эта беседа назначена как <b>General</b>.\n\n"
-        "Представители других группировок после подтверждения роли смогут писать только здесь. "
-        "Остальные темы они смогут читать, но их сообщения там бот будет удалять."
-    )
-
+    await db.set_topic("general", message.chat.id, thread_id)
+    await db.set_setting("primary_chat_id", str(message.chat.id))
+    await db.audit(message.from_user.id, "topic.set", f"general={message.chat.id}/{thread_id}")
+    from .multitask_handlers import announce_topic
+    await announce_topic(message.bot, db, "general", force=True)
+    await temp_answer(message, "✅ General привязан. Постоянная инструкция обновлена.", ttl=45)
+    await delete_incoming_later(message)
 
 @router.message(Command("set_storage_topic"), F.chat.type.in_(GROUP_TYPES))
 async def set_storage_topic_group(message: Message, db: Database, config: Config):
     if not message.from_user or not await has_permission(message.from_user.id, "storage.manage", db, config):
-        await message.answer("Недостаточно прав.")
+        await temp_answer(message, "Недостаточно прав.", ttl=45)
         return
     topic = topic_tuple_from_message(message)
     if not topic:
-        await message.answer("Отправьте /set_storage_topic прямо внутри темы «Снаряжение группировки».")
+        await temp_answer(message, "Отправьте /set_storage_topic прямо внутри темы «Снаряжение группировки».", ttl=90)
         return
     await db.set_storage_topic(*topic)
-    await message.answer(
-        "<b>📦 ХРАНИЛИЩЕ ГРУППИРОВКИ</b>\n\n"
-        "Администраторы принимают и выдают предметы прямо здесь.\n"
-        "Актуальный список открывается кнопкой «📋 На хранении».",
-        reply_markup=group_storage_panel(),
-    )
-
+    await db.set_topic("storage", *topic)
+    await db.set_setting("primary_chat_id", str(message.chat.id))
+    await db.audit(message.from_user.id, "topic.set", f"storage={topic[0]}/{topic[1]}")
+    from .multitask_handlers import announce_topic
+    await announce_topic(message.bot, db, "storage", force=True)
+    await temp_answer(message, "✅ Раздел снаряжения привязан. Панель обновлена без дублей.", ttl=45)
+    await delete_incoming_later(message)
 
 @router.message(Command("storage_panel"), F.chat.type.in_(GROUP_TYPES))
 async def storage_panel_group(message: Message, db: Database, config: Config):
@@ -306,33 +328,30 @@ async def storage_panel_group(message: Message, db: Database, config: Config):
         return
     configured = await db.get_storage_topic()
     if topic_tuple_from_message(message) != configured:
-        await message.answer("Эта команда должна быть отправлена в настроенной теме Хранилища.")
+        await temp_answer(message, "Эта команда должна быть отправлена в настроенной теме Хранилища.", ttl=60)
         return
-    items_count, players_count = await db.storage_stats()
-    await message.answer(
-        "<b>📦 ХРАНИЛИЩЕ ГРУППИРОВКИ</b>\n\n"
-        f"На хранении: <b>{items_count}</b>\nИгроков с имуществом: <b>{players_count}</b>",
-        reply_markup=group_storage_panel(),
-    )
-
+    from .multitask_handlers import announce_topic
+    await announce_topic(message.bot, db, "storage", force=True)
+    await temp_answer(message, "✅ Панель хранилища обновлена выше.", ttl=30)
+    await delete_incoming_later(message)
 
 @router.message(Command("set_market_topic"), F.chat.type.in_(GROUP_TYPES))
 async def set_market_topic_group(message: Message, db: Database, config: Config):
     if not message.from_user or not await has_permission(message.from_user.id, "market.manage", db, config):
-        await message.answer("Недостаточно прав.")
+        await temp_answer(message, "Недостаточно прав.", ttl=45)
         return
     topic = topic_tuple_from_message(message)
     if not topic:
-        await message.answer("Отправьте /set_market_topic прямо внутри темы «Рынок ГП».")
+        await temp_answer(message, "Отправьте /set_market_topic прямо внутри темы «Рынок ГП».", ttl=90)
         return
     await db.set_market_topic(*topic)
-    await message.answer(
-        "<b>🛒 РЫНОК ГП</b>\n\n"
-        "Заказы формируются прямо в этой теме.\n"
-        "Игрок нажимает «Новый заказ», добавляет позиции и отправляет его Торговцу ГП.",
-        reply_markup=group_market_panel(),
-    )
-
+    await db.set_topic("market", *topic)
+    await db.set_setting("primary_chat_id", str(message.chat.id))
+    await db.audit(message.from_user.id, "topic.set", f"market={topic[0]}/{topic[1]}")
+    from .multitask_handlers import announce_topic
+    await announce_topic(message.bot, db, "market", force=True)
+    await temp_answer(message, "✅ Рынок ГП привязан. Панель обновлена без дублей.", ttl=45)
+    await delete_incoming_later(message)
 
 @router.message(Command("market_panel"), F.chat.type.in_(GROUP_TYPES))
 async def market_panel_group(message: Message, db: Database, config: Config):
@@ -340,37 +359,32 @@ async def market_panel_group(message: Message, db: Database, config: Config):
         return
     configured = await db.get_market_topic()
     if topic_tuple_from_message(message) != configured:
-        await message.answer("Эта команда должна быть отправлена в настроенной теме Рынка ГП.")
+        await temp_answer(message, "Эта команда должна быть отправлена в настроенной теме Рынка ГП.", ttl=60)
         return
-    await message.answer("<b>🛒 РЫНОК ГП</b>\n\nСоздавайте заказы кнопкой ниже.", reply_markup=group_market_panel())
-
+    from .multitask_handlers import announce_topic
+    await announce_topic(message.bot, db, "market", force=True)
+    await temp_answer(message, "✅ Панель Рынка ГП обновлена выше.", ttl=30)
+    await delete_incoming_later(message)
 
 @router.message(Command("set_nicks_topic"), F.chat.type.in_(GROUP_TYPES))
 async def set_nicks_topic_group(message: Message, db: Database, config: Config, bot: Bot, telethon: TelethonManager):
     if not message.from_user or not await can_manage_roles(message.from_user.id, db, config):
-        await message.answer("Недостаточно прав.")
+        await temp_answer(message, "Недостаточно прав.", ttl=45)
         return
     topic = topic_tuple_from_message(message)
     if not topic:
-        await message.answer("Отправьте /set_nicks_topic прямо внутри темы «Ники игроков».")
+        await temp_answer(message, "Отправьте /set_nicks_topic прямо внутри темы «Ники игроков».", ttl=90)
         return
     await db.set_nicks_topic(*topic)
+    await db.set_topic("nicks", *topic)
+    await db.set_setting("primary_chat_id", str(message.chat.id))
+    await db.audit(message.from_user.id, "topic.set", f"nicks={topic[0]}/{topic[1]}")
+    from .multitask_handlers import announce_topic
+    await announce_topic(message.bot, db, "nicks", force=True)
     connected = await telethon.is_connected()
-    me = await bot.get_me()
-    await message.answer(
-        "<b>👥 НИКИ ИГРОКОВ</b>\n\n"
-        "✅ Эта тема назначена реестром участников.\n"
-        "Формат сообщения: <code>Ник\nДолжность</code>.\n"
-        "Все должности активируются только после подтверждения руководства.\n\n"
-        + ("📚 Старые сообщения можно импортировать кнопкой ниже." if connected else "📚 Для старых сообщений один раз подключите Telethon."),
-        reply_markup=group_nicks_admin_menu(
-            connected=connected,
-            bot_username=me.username,
-            can_manage=can_manage_telethon(message.from_user.id, config),
-            topic_ready=True,
-        ),
-    )
-
+    extra = " Старую историю можно импортировать через /admin." if connected else " Для старой истории подключите Telethon через /admin."
+    await temp_answer(message, "✅ Реестр ников привязан." + extra, ttl=60)
+    await delete_incoming_later(message)
 
 @router.message(Command("nicks_status"), F.chat.type.in_(GROUP_TYPES))
 async def nicks_status_group(message: Message, db: Database, config: Config, bot: Bot, telethon: TelethonManager):
@@ -381,105 +395,80 @@ async def nicks_status_group(message: Message, db: Database, config: Config, bot
     connected = await telethon.is_connected()
     count = await db.count_players()
     pending_roles = await db.count_pending_role_requests()
-    me = await bot.get_me()
-    await message.answer(
+    text = (
         "<b>👥 Ники игроков</b>\n\n"
         f"Тема: {'✅ настроена' if topic else '⚠️ не настроена'}\n"
         f"Игроков в базе: <b>{count}</b>\n"
         f"Ожидают подтверждения роли: <b>{pending_roles}</b>\n"
         f"Telethon: {'🟢 подключён' if connected else '🔴 не подключён'}\n"
-        f"Старая история: {'✅ ' + str(imported_count) + ' записей, ' + escape(imported_at) if imported_at else '⚠️ ещё не импортирована'}",
-        reply_markup=group_nicks_admin_menu(
-            connected=connected,
-            bot_username=me.username,
-            can_manage=can_manage_telethon(message.from_user.id, config),
-            topic_ready=topic is not None,
-        ),
+        f"Старая история: {'✅ ' + str(imported_count) + ' записей, ' + escape(imported_at) if imported_at else '⚠️ ещё не импортирована'}"
     )
-
-
-# ---------------------------------------------------------------------------
-# Group admin dashboard. Telethon secrets are entered in a browser window.
-# ---------------------------------------------------------------------------
-
-async def group_admin_text(db: Database, telethon: TelethonManager) -> str:
-    storage = await db.get_storage_topic()
-    nicks = await db.get_nicks_topic()
-    market = await db.get_market_topic()
-    general = await db.get_general_topic()
-    merchant = await db.get_market_merchant_target()
-    pending_roles = await db.count_pending_role_requests()
-    connected = await telethon.is_connected()
-    return (
-        "<b>⚙️ УПРАВЛЕНИЕ ГРУППОЙ</b>\n\n"
-        f"💬 General: {'✅' if general else '⚠️ не назначено'}\n"
-        f"🎒 Снаряжение группировки: {'✅' if storage else '⚠️ не назначено'}\n"
-        f"👥 Ники игроков: {'✅' if nicks else '⚠️ не назначено'}\n"
-        f"🎖 Запросов должностей: <b>{pending_roles}</b>\n"
-        f"🛒 Рынок ГП: {'✅' if market else '⚠️ не назначено'}\n"
-        f"👤 Торговец ГП: <code>{escape(merchant) if merchant else 'не назначен'}</code>\n"
-        f"🔐 Telethon: {'🟢 подключён' if connected else '🔴 не подключён'}\n\n"
-        "Для ограничения внешних лидеров/заместителей отправьте <code>/set_general_topic</code> в теме General."
-    )
-
+    await temp_answer(message, text, ttl=120)
+    await delete_incoming_later(message)
 
 @router.message(Command("set_role"), F.chat.type.in_(GROUP_TYPES))
 async def set_role_command(message: Message, db: Database, config: Config, bot: Bot):
     if not message.from_user or not await can_manage_roles(message.from_user.id, db, config):
-        await message.answer("Недостаточно прав.")
+        await temp_answer(message, "Недостаточно прав.", ttl=45)
         return
     source = message.reply_to_message
     if not source or not source.from_user or source.from_user.is_bot:
-        await message.answer(
+        await temp_answer(
+            message,
             "Ответьте этой командой на сообщение участника:\n"
             "<code>/set_role Кладовщик</code>\n"
-            "или <code>/set_role Лидер Долга</code>."
+            "или <code>/set_role Лидер Долга</code>.",
+            ttl=60,
         )
         return
     parts = (message.text or "").split(maxsplit=1)
     if len(parts) < 2:
-        await message.answer("Укажите должность после команды: <code>/set_role Рядовой</code>.")
+        await temp_answer(message, "Укажите должность после команды: <code>/set_role Рядовой</code>.", ttl=60)
         return
     parsed = parse_position(parts[1])
     if not parsed:
-        await message.answer("Неизвестная должность. Проверьте написание.")
+        await temp_answer(message, "Неизвестная должность. Проверьте написание.", ttl=60)
         return
     position_code, faction_code, label = parsed
     player = await db.get_player(source.from_user.id)
     if not player:
-        await message.answer("Игрок ещё не найден в реестре «Ники игроков».")
+        await temp_answer(message, "Игрок ещё не найден в реестре «Ники игроков».", ttl=60)
         return
     await db.set_player_role(source.from_user.id, position_code, faction_code, message.from_user.id)
-    await message.answer(f"✅ <b>{escape(player.game_nickname)}</b> назначен: <b>{escape(label)}</b>.")
+    await temp_answer(message, f"✅ <b>{escape(player.game_nickname)}</b> назначен: <b>{escape(label)}</b>.", ttl=60)
     try:
         await bot.send_message(source.from_user.id, f"✅ Вам назначена должность: <b>{escape(label)}</b>.")
     except Exception:
         pass
+    await delete_incoming_later(message)
 
 
 @router.message(Command("clear_role"), F.chat.type.in_(GROUP_TYPES))
 async def clear_role_command(message: Message, db: Database, config: Config):
     if not message.from_user or not await can_manage_roles(message.from_user.id, db, config):
-        await message.answer("Недостаточно прав.")
+        await temp_answer(message, "Недостаточно прав.", ttl=45)
         return
     source = message.reply_to_message
     if not source or not source.from_user or source.from_user.is_bot:
-        await message.answer("Ответьте <code>/clear_role</code> на сообщение участника.")
+        await temp_answer(message, "Ответьте <code>/clear_role</code> на сообщение участника.", ttl=60)
         return
     player = await db.get_player(source.from_user.id)
     if not player:
-        await message.answer("Игрок не найден в базе.")
+        await temp_answer(message, "Игрок не найден в базе.", ttl=60)
         return
     await db.clear_player_role(source.from_user.id, message.from_user.id)
-    await message.answer(f"✅ Должность <b>{escape(player.game_nickname)}</b> снята.")
+    await temp_answer(message, f"✅ Должность <b>{escape(player.game_nickname)}</b> снята.", ttl=60)
+    await delete_incoming_later(message)
 
 
 @router.message(Command("admin"), F.chat.type.in_(GROUP_TYPES))
 async def group_admin(message: Message, db: Database, config: Config, telethon: TelethonManager):
     if not message.from_user or not await can_manage_roles(message.from_user.id, db, config):
-        await message.answer("Недостаточно прав.")
+        await temp_answer(message, "Недостаточно прав.", ttl=45)
         return
-    await message.answer(await group_admin_text(db, telethon), reply_markup=group_admin_menu())
+    await db.set_setting("primary_chat_id", str(message.chat.id))
+    await temp_answer(message, await group_admin_text(db, telethon), reply_markup=group_admin_menu(), ttl=900)
+    await delete_incoming_later(message)
 
 
 @router.callback_query(F.data == "gadmin:home", F.message.chat.type.in_(GROUP_TYPES))
@@ -704,7 +693,7 @@ async def group_telethon_disconnect(callback: CallbackQuery, config: Config, bot
 # Storage flow entirely inside the configured forum topic
 # ---------------------------------------------------------------------------
 
-async def show_group_players(callback: CallbackQuery, db: Database, page: int, *, edit: bool) -> None:
+async def show_group_players(callback: CallbackQuery, db: Database, state: FSMContext, page: int, *, edit: bool) -> None:
     page_size = 10
     total = await db.count_players()
     players = await db.list_players(limit=page_size, offset=page * page_size)
@@ -716,7 +705,8 @@ async def show_group_players(callback: CallbackQuery, db: Database, page: int, *
     if edit:
         await callback.message.edit_text(text, reply_markup=markup)
     else:
-        await callback.message.answer(text, reply_markup=markup)
+        sent = await callback.message.answer(text, reply_markup=markup)
+        await state.update_data(flow_message_id=sent.message_id)
     await callback.answer()
 
 
@@ -729,7 +719,7 @@ async def group_storage_add(callback: CallbackQuery, db: Database, state: FSMCon
         return
     await state.clear()
     await state.update_data(flow_chat_id=topic[0], flow_thread_id=topic[1])
-    await show_group_players(callback, db, 0, edit=False)
+    await show_group_players(callback, db, state, 0, edit=False)
 
 
 @router.callback_query(F.data.startswith("gstorage:players_page:"), F.message.chat.type.in_(GROUP_TYPES))
@@ -740,7 +730,7 @@ async def group_storage_players_page(callback: CallbackQuery, db: Database, stat
         await callback.answer("Сессия устарела. Начните приём предмета заново.", show_alert=True)
         return
     page = int(callback.data.rsplit(":", 1)[1])
-    await show_group_players(callback, db, page, edit=True)
+    await show_group_players(callback, db, state, page, edit=True)
 
 
 @router.callback_query(F.data.startswith("gstorage:player:"), F.message.chat.type.in_(GROUP_TYPES))
@@ -795,16 +785,17 @@ async def group_storage_name(message: Message, db: Database, state: FSMContext, 
     if not message.from_user or not await has_permission(message.from_user.id, "storage.manage", db, config):
         return
     if not await flow_matches_message(message, state):
-        await message.answer("Продолжите добавление предмета в теме «Снаряжение группировки».")
+        await temp_answer(message, "Продолжите добавление предмета в теме «Снаряжение группировки».", ttl=60)
         return
     name = (message.text or "").strip()
     if not 1 <= len(name) <= 80:
-        await message.answer("Название должно быть от 1 до 80 символов.")
+        await temp_answer(message, "Название должно быть от 1 до 80 символов.", ttl=60)
         return
     await state.update_data(item_name=name)
     await state.set_state(GroupAddItem.quantity)
     await safe_delete(message)
-    await message.answer(
+    await flow_edit_from_message(
+        message, state,
         f"🎒 Предмет: <b>{escape(name)}</b>\n\n🔢 Выберите количество или введите своё:",
         reply_markup=group_quantity_keyboard("gstorage"),
     )
@@ -831,21 +822,22 @@ async def group_storage_qty_text(message: Message, db: Database, state: FSMConte
     if not message.from_user or not await has_permission(message.from_user.id, "storage.manage", db, config):
         return
     if not await flow_matches_message(message, state):
-        await message.answer("Продолжите добавление предмета в теме «Снаряжение группировки».")
+        await temp_answer(message, "Продолжите добавление предмета в теме «Снаряжение группировки».", ttl=60)
         return
     raw = (message.text or "").strip()
     if not raw.isdigit() or not 1 <= int(raw) <= 9999:
-        await message.answer("Введите целое количество от 1 до 9999.")
+        await temp_answer(message, "Введите целое количество от 1 до 9999.", ttl=60)
         return
     await state.update_data(quantity=int(raw))
     await state.set_state(GroupAddItem.comment)
     await safe_delete(message)
-    await message.answer("📝 Добавьте комментарий или пропустите:", reply_markup=group_storage_comment_keyboard())
+    await flow_edit_from_message(message, state, "📝 Добавьте комментарий или пропустите:", reply_markup=group_storage_comment_keyboard())
 
 
 async def show_group_storage_confirm(message: Message, state: FSMContext) -> None:
     data = await state.get_data()
-    await message.answer(
+    await flow_edit_from_message(
+        message, state,
         "<b>📦 Новый предмет</b>\n\n"
         f"👤 Владелец: <b>{escape(data['player_nickname'])}</b>\n"
         f"🎒 Предмет: <b>{escape(data['item_name'])}</b>\n"
@@ -879,11 +871,11 @@ async def group_storage_comment(message: Message, db: Database, state: FSMContex
     if not message.from_user or not await has_permission(message.from_user.id, "storage.manage", db, config):
         return
     if not await flow_matches_message(message, state):
-        await message.answer("Продолжите добавление предмета в теме «Снаряжение группировки».")
+        await temp_answer(message, "Продолжите добавление предмета в теме «Снаряжение группировки».", ttl=60)
         return
     comment = (message.text or "").strip()
     if len(comment) > 500:
-        await message.answer("Комментарий слишком длинный. Максимум 500 символов.")
+        await temp_answer(message, "Комментарий слишком длинный. Максимум 500 символов.", ttl=60)
         return
     await state.update_data(comment=comment or None)
     await state.set_state(GroupAddItem.confirm)
@@ -926,7 +918,7 @@ async def group_storage_list(callback: CallbackQuery, db: Database, config: Conf
         await callback.answer("Здесь пока пусто.", show_alert=True)
         return
     title = "📋 <b>Сейчас на хранении</b>" if status == "stored" else "📜 <b>Последние выдачи</b>"
-    await callback.message.answer(title + "\n\nНажмите на предмет, чтобы открыть карточку.", reply_markup=storage_items_keyboard(items))
+    await temp_callback_message(callback, title + "\n\nНажмите на предмет, чтобы открыть карточку.", reply_markup=storage_items_keyboard(items), ttl=config.temp_message_ttl)
     await callback.answer()
 
 
@@ -957,26 +949,28 @@ async def group_market_new(callback: CallbackQuery, db: Database, state: FSMCont
         market_comment=None,
     )
     await state.set_state(GroupMarketOrder.item_name)
-    await callback.message.answer(
+    sent = await callback.message.answer(
         f"🛒 Новый заказ от <b>{escape(player.game_nickname)}</b>\n\n🎒 Напишите название первой позиции:",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="gflow:cancel")]]),
     )
+    await state.update_data(flow_message_id=sent.message_id)
     await callback.answer()
 
 
 @router.message(GroupMarketOrder.item_name, F.chat.type.in_(GROUP_TYPES))
 async def group_market_item_name(message: Message, state: FSMContext):
     if not await flow_matches_message(message, state):
-        await message.answer("Продолжите оформление заказа в теме Рынок ГП.")
+        await temp_answer(message, "Продолжите оформление заказа в теме Рынок ГП.", ttl=60)
         return
     name = (message.text or "").strip()
     if not 1 <= len(name) <= 80:
-        await message.answer("Название должно быть от 1 до 80 символов.")
+        await temp_answer(message, "Название должно быть от 1 до 80 символов.", ttl=60)
         return
     await state.update_data(market_pending_name=name)
     await state.set_state(GroupMarketOrder.quantity)
     await safe_delete(message)
-    await message.answer(
+    await flow_edit_from_message(
+        message, state,
         f"🎒 <b>{escape(name)}</b>\n\n🔢 Выберите количество или введите своё:",
         reply_markup=group_quantity_keyboard("gmarket"),
     )
@@ -988,7 +982,7 @@ async def finish_market_quantity(message: Message, state: FSMContext, quantity: 
     items.append({"name": data["market_pending_name"], "quantity": quantity})
     await state.update_data(market_items=items)
     await state.set_state(None)
-    await message.answer(cart_text(items, data.get("market_comment")), reply_markup=group_market_cart_keyboard(True))
+    await flow_edit_from_message(message, state, cart_text(items, data.get("market_comment")), reply_markup=group_market_cart_keyboard(True))
 
 
 @router.callback_query(GroupMarketOrder.quantity, F.data.startswith("gmarket:qty:"), F.message.chat.type.in_(GROUP_TYPES))
@@ -1013,11 +1007,11 @@ async def group_market_qty_button(callback: CallbackQuery, state: FSMContext):
 @router.message(GroupMarketOrder.quantity, F.chat.type.in_(GROUP_TYPES))
 async def group_market_qty_text(message: Message, state: FSMContext):
     if not await flow_matches_message(message, state):
-        await message.answer("Продолжите оформление заказа в теме Рынок ГП.")
+        await temp_answer(message, "Продолжите оформление заказа в теме Рынок ГП.", ttl=60)
         return
     raw = (message.text or "").strip()
     if not raw.isdigit() or not 1 <= int(raw) <= 9999:
-        await message.answer("Введите целое количество от 1 до 9999.")
+        await temp_answer(message, "Введите целое количество от 1 до 9999.", ttl=60)
         return
     data = await state.get_data()
     items = list(data.get("market_items", []))
@@ -1025,7 +1019,7 @@ async def group_market_qty_text(message: Message, state: FSMContext):
     await state.update_data(market_items=items)
     await state.set_state(None)
     await safe_delete(message)
-    await message.answer(cart_text(items, data.get("market_comment")), reply_markup=group_market_cart_keyboard(True))
+    await flow_edit_from_message(message, state, cart_text(items, data.get("market_comment")), reply_markup=group_market_cart_keyboard(True))
 
 
 @router.callback_query(F.data == "gmarket:add_more", F.message.chat.type.in_(GROUP_TYPES))
@@ -1034,7 +1028,7 @@ async def group_market_add_more(callback: CallbackQuery, state: FSMContext):
         await callback.answer("Сессия заказа устарела. Начните новый заказ.", show_alert=True)
         return
     await state.set_state(GroupMarketOrder.item_name)
-    await callback.message.answer(
+    await callback.message.edit_text(
         "🎒 Напишите название следующей позиции:",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="gflow:cancel")]]),
     )
@@ -1047,24 +1041,24 @@ async def group_market_comment_start(callback: CallbackQuery, state: FSMContext)
         await callback.answer("Сессия заказа устарела.", show_alert=True)
         return
     await state.set_state(GroupMarketOrder.comment)
-    await callback.message.answer("📝 Напишите комментарий к заказу:", reply_markup=group_market_comment_keyboard())
+    await callback.message.edit_text("📝 Напишите комментарий к заказу:", reply_markup=group_market_comment_keyboard())
     await callback.answer()
 
 
 @router.message(GroupMarketOrder.comment, F.chat.type.in_(GROUP_TYPES))
 async def group_market_comment_text(message: Message, state: FSMContext):
     if not await flow_matches_message(message, state):
-        await message.answer("Продолжите оформление заказа в теме Рынок ГП.")
+        await temp_answer(message, "Продолжите оформление заказа в теме Рынок ГП.", ttl=60)
         return
     comment = (message.text or "").strip()
     if len(comment) > 500:
-        await message.answer("Комментарий слишком длинный. Максимум 500 символов.")
+        await temp_answer(message, "Комментарий слишком длинный. Максимум 500 символов.", ttl=60)
         return
     await state.update_data(market_comment=comment or None)
     await state.set_state(None)
     data = await state.get_data()
     await safe_delete(message)
-    await message.answer(cart_text(data.get("market_items", []), comment or None), reply_markup=group_market_cart_keyboard(True))
+    await flow_edit_from_message(message, state, cart_text(data.get("market_items", []), comment or None), reply_markup=group_market_cart_keyboard(True))
 
 
 @router.callback_query(GroupMarketOrder.comment, F.data == "gmarket:comment_skip", F.message.chat.type.in_(GROUP_TYPES))
@@ -1170,7 +1164,7 @@ async def group_market_mine(callback: CallbackQuery, db: Database, config: Confi
     lines = ["<b>📋 Мои последние заказы</b>", ""]
     for order in orders:
         lines.append(f"{WORKFLOW_LABELS.get(order.workflow_status, '•')} <b>#{order.id}</b> — {fmt_dt(order.created_at)}")
-    await callback.message.answer("\n".join(lines))
+    await temp_callback_message(callback, "\n".join(lines), ttl=config.temp_message_ttl)
     await callback.answer()
 
 
@@ -1181,7 +1175,7 @@ async def group_market_mine(callback: CallbackQuery, db: Database, config: Confi
 @router.message(Command("set_gp_merchant"), F.chat.type.in_(GROUP_TYPES))
 async def set_gp_merchant_command(message: Message, db: Database, config: Config):
     if not message.from_user or not await has_permission(message.from_user.id, "market.manage", db, config):
-        await message.answer("Недостаточно прав.")
+        await temp_answer(message, "Недостаточно прав.", ttl=45)
         return
     target = ""
     if message.reply_to_message and message.reply_to_message.from_user and not message.reply_to_message.from_user.is_bot:
@@ -1193,15 +1187,19 @@ async def set_gp_merchant_command(message: Message, db: Database, config: Config
     if target.startswith("https://t.me/"):
         target = "@" + target.split("https://t.me/", 1)[1].strip("/").split("/", 1)[0]
     if not (re.fullmatch(r"-?\d+", target) or re.fullmatch(r"@[A-Za-z0-9_]{5,32}", target)):
-        await message.answer(
+        await temp_answer(
+            message,
             "Назначение Торговца ГП:\n"
             "• ответьте командой <code>/set_gp_merchant</code> на сообщение Торговца; или\n"
             "• <code>/set_gp_merchant @username</code>; или\n"
-            "• <code>/set_gp_merchant 123456789</code>."
+            "• <code>/set_gp_merchant 123456789</code>.",
+            ttl=120,
         )
         return
     await db.set_market_merchant_target(target)
-    await message.answer(f"✅ Торговец ГП назначен: <code>{escape(target)}</code>")
+    await db.audit(message.from_user.id, "market.merchant", target)
+    await temp_answer(message, f"✅ Торговец ГП назначен: <code>{escape(target)}</code>", ttl=60)
+    await delete_incoming_later(message)
 
 
 @router.callback_query(F.data == "gadmin:market", F.message.chat.type.in_(GROUP_TYPES))
@@ -1232,10 +1230,12 @@ async def group_market_merchant_start(callback: CallbackQuery, db: Database, sta
     await state.clear()
     await state.update_data(flow_chat_id=callback.message.chat.id, flow_thread_id=callback.message.message_thread_id)
     await state.set_state(GroupMarketSettings.merchant_target)
-    await callback.message.answer(
+    await temp_callback_message(
+        callback,
         "👤 Напишите <code>@username</code> или числовой Telegram ID Торговца ГП.\n\n"
         "Ещё удобнее: отмените это действие и ответьте командой <code>/set_gp_merchant</code> на любое сообщение самого Торговца.",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="gflow:cancel")]]),
+        ttl=300,
     )
     await callback.answer()
 
@@ -1245,18 +1245,19 @@ async def group_market_merchant_save(message: Message, db: Database, state: FSMC
     if not message.from_user or not await has_permission(message.from_user.id, "market.manage", db, config):
         return
     if not await flow_matches_message(message, state):
-        await message.answer("Продолжите настройку в той же теме.")
+        await temp_answer(message, "Продолжите настройку в той же теме.", ttl=60)
         return
     raw = (message.text or "").strip()
     if raw.startswith("https://t.me/"):
         raw = "@" + raw.split("https://t.me/", 1)[1].strip("/").split("/", 1)[0]
     if not (re.fullmatch(r"-?\d+", raw) or re.fullmatch(r"@[A-Za-z0-9_]{5,32}", raw)):
-        await message.answer("Введите @username или числовой Telegram ID.")
+        await temp_answer(message, "Введите @username или числовой Telegram ID.", ttl=60)
         return
     await db.set_market_merchant_target(raw)
+    await db.audit(message.from_user.id, "market.merchant", raw)
     await state.clear()
     await safe_delete(message)
-    await message.answer(f"✅ Торговец ГП назначен: <code>{escape(raw)}</code>")
+    await temp_answer(message, f"✅ Торговец ГП назначен: <code>{escape(raw)}</code>", ttl=60)
 
 
 @router.callback_query(F.data == "gmarket_settings:test", F.message.chat.type.in_(GROUP_TYPES))
@@ -1276,9 +1277,9 @@ async def group_market_test(callback: CallbackQuery, db: Database, config: Confi
             target,
             "🧪 <b>Тест связи XZONA Group Bot</b>\n\nДоставка заказов Рынка ГП настроена.",
         )
-        await callback.message.answer(f"✅ Тест доставлен через {'Telegram Bot' if method == 'bot' else 'Telethon'}.")
+        await temp_callback_message(callback, f"✅ Тест доставлен через {'Telegram Bot' if method == 'bot' else 'Telethon'}.", ttl=60)
     except Exception as exc:
-        await callback.message.answer(f"⚠️ Личная доставка не прошла: <code>{escape(str(exc)[:500])}</code>\nЗаказы всё равно будут видны в теме Рынок ГП.")
+        await temp_callback_message(callback, f"⚠️ Личная доставка не прошла: <code>{escape(str(exc)[:500])}</code>\nЗаказы всё равно будут видны в теме Рынок ГП.", ttl=120)
 
 
 ALLOWED_TRANSITIONS = {
@@ -1330,10 +1331,54 @@ async def group_order_status(callback: CallbackQuery, db: Database, config: Conf
     if new_status not in ALLOWED_TRANSITIONS.get(order.workflow_status, set()):
         await callback.answer("Этот переход статуса уже недоступен.", show_alert=True)
         return
+    stock_items = [(x.item_name, x.quantity) for x in items]
+    shortages: list[tuple[str, int, int]] = []
+    if new_status == "accepted":
+        ok, shortages = await db.gp_stock_reserve(stock_items, callback.from_user.id)
+        if not ok:
+            lines = ["⚠️ Заказ не принят: на складе ГП недостаточно свободного остатка:"] + [
+                f"• {name}: нужно {need}, доступно {have}" for name, need, have in shortages
+            ]
+            try:
+                from .housekeeping import temp_callback_message
+                await temp_callback_message(callback, "\n".join(lines), ttl=120)
+            except Exception:
+                pass
+            await callback.answer("Недостаточно свободного остатка", show_alert=True)
+            return
+    elif new_status == "rejected" and order.workflow_status == "accepted":
+        await db.gp_stock_release(stock_items, callback.from_user.id)
+    elif new_status == "issued":
+        ok, shortages = await db.gp_stock_consume_reserved(stock_items, callback.from_user.id)
+        if not ok:
+            lines = ["⚠️ Выдача не закрыта: резерв склада повреждён или недостаточен:"] + [
+                f"• {name}: нужно {need}, в резерве {have}" for name, need, have in shortages
+            ]
+            try:
+                from .housekeeping import temp_callback_message
+                await temp_callback_message(callback, "\n".join(lines), ttl=120)
+            except Exception:
+                pass
+            await callback.answer("Проверьте склад ГП", show_alert=True)
+            return
     await db.set_market_workflow_status(order_id, new_status)
     loaded = await db.get_market_order(order_id)
     order, items = loaded
     await refresh_order_cards(bot, order, items)
+    if new_status == "assembled":
+        try:
+            from .multitask_handlers import publish_delivery_card
+            await publish_delivery_card(bot, db, order_id)
+        except Exception:
+            pass
+    if new_status in {"issued", "rejected"}:
+        ref = await db.get_market_delivery_ref(order_id)
+        if ref:
+            try:
+                from .multitask_handlers import delivery_text
+                await bot.edit_message_text(chat_id=ref[0], message_id=ref[2], text=delivery_text(order, items), reply_markup=None)
+            except Exception:
+                pass
     await callback.answer(WORKFLOW_LABELS.get(new_status, "Статус изменён"))
 
 
@@ -1346,6 +1391,7 @@ async def group_flow_cancel(callback: CallbackQuery, state: FSMContext):
     await state.clear()
     try:
         await callback.message.edit_text("❌ Операция отменена.")
+        schedule_delete(callback.bot, callback.message.chat.id, callback.message.message_id, 20)
     except Exception:
         pass
     await callback.answer()
@@ -1353,18 +1399,17 @@ async def group_flow_cancel(callback: CallbackQuery, state: FSMContext):
 
 # Optional text shortcuts if admins/users still have an old reply keyboard.
 @router.message(F.text == "🎒 Снаряжение группировки", F.chat.type.in_(GROUP_TYPES))
-async def group_storage_text_shortcut(message: Message, db: Database):
+async def group_storage_text_shortcut(message: Message, db: Database, config: Config):
     if topic_tuple_from_message(message) != await db.get_storage_topic():
         return
     count, players = await db.storage_stats()
-    await message.answer(
-        f"<b>🎒 Снаряжение группировки</b>\n\nНа хранении: <b>{count}</b>\nИгроков: <b>{players}</b>",
-        reply_markup=group_storage_panel(),
+    await temp_answer(
+        message, f"<b>🎒 Снаряжение группировки</b>\n\nНа хранении: <b>{count}</b>\nИгроков: <b>{players}</b>", reply_markup=group_storage_panel(), ttl=config.temp_message_ttl
     )
 
 
 @router.message(F.text == "🛒 Рынок ГП", F.chat.type.in_(GROUP_TYPES))
-async def group_market_text_shortcut(message: Message, db: Database):
+async def group_market_text_shortcut(message: Message, db: Database, config: Config):
     if topic_tuple_from_message(message) != await db.get_market_topic():
         return
-    await message.answer("<b>🛒 Рынок ГП</b>", reply_markup=group_market_panel())
+    await temp_answer(message, "<b>🛒 Рынок ГП</b>", reply_markup=group_market_panel(), ttl=config.temp_message_ttl)

@@ -11,6 +11,23 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+def _aggregate_items(items: list[tuple[str, int]]) -> list[tuple[str, int]]:
+    """Aggregate duplicate item names case-insensitively before stock operations."""
+    merged: dict[str, list[object]] = {}
+    order: list[str] = []
+    for raw_name, raw_qty in items:
+        name = str(raw_name).strip()
+        qty = int(raw_qty)
+        if not name or qty <= 0:
+            continue
+        key = name.casefold()
+        if key not in merged:
+            merged[key] = [name, 0]
+            order.append(key)
+        merged[key][1] = int(merged[key][1]) + qty
+    return [(str(merged[k][0]), int(merged[k][1])) for k in order]
+
+
 @dataclass(slots=True)
 class Player:
     telegram_id: int
@@ -130,6 +147,15 @@ class Database:
                     updated_at TEXT NOT NULL
                 );
 
+                CREATE TABLE IF NOT EXISTS ephemeral_messages (
+                    chat_id INTEGER NOT NULL,
+                    message_id INTEGER NOT NULL,
+                    delete_after TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY(chat_id, message_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_ephemeral_delete_after ON ephemeral_messages(delete_after);
+
                 CREATE TABLE IF NOT EXISTS role_requests (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     telegram_id INTEGER NOT NULL,
@@ -195,6 +221,109 @@ class Database:
             for column, sql in migrations:
                 if column not in market_columns:
                     await db.execute(sql)
+            # v7 multitask modules
+            await db.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS gp_stock (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    item_name TEXT NOT NULL COLLATE NOCASE UNIQUE,
+                    quantity INTEGER NOT NULL DEFAULT 0 CHECK(quantity >= 0),
+                    reserved INTEGER NOT NULL DEFAULT 0 CHECK(reserved >= 0),
+                    updated_by INTEGER,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    title TEXT NOT NULL,
+                    details TEXT,
+                    starts_at TEXT NOT NULL,
+                    capacity INTEGER NOT NULL DEFAULT 0 CHECK(capacity >= 0),
+                    status TEXT NOT NULL DEFAULT 'open' CHECK(status IN ('open','closed','cancelled','done')),
+                    created_by INTEGER NOT NULL,
+                    created_at TEXT NOT NULL,
+                    chat_id INTEGER,
+                    thread_id INTEGER,
+                    message_id INTEGER
+                );
+                CREATE TABLE IF NOT EXISTS event_participants (
+                    event_id INTEGER NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'joined' CHECK(status IN ('joined','declined','attended')),
+                    joined_at TEXT NOT NULL,
+                    PRIMARY KEY(event_id, user_id),
+                    FOREIGN KEY(event_id) REFERENCES events(id) ON DELETE CASCADE
+                );
+                CREATE TABLE IF NOT EXISTS diplomacy_records (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    faction_name TEXT NOT NULL COLLATE NOCASE UNIQUE,
+                    relation TEXT NOT NULL CHECK(relation IN ('ally','neutral','war')),
+                    note TEXT,
+                    updated_by INTEGER NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS diplomacy_history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    faction_name TEXT NOT NULL,
+                    relation TEXT NOT NULL CHECK(relation IN ('ally','neutral','war')),
+                    note TEXT,
+                    changed_by INTEGER NOT NULL,
+                    changed_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS targets (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    target_name TEXT NOT NULL,
+                    reason TEXT,
+                    reward TEXT,
+                    last_location TEXT,
+                    status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','taken','done','cancelled')),
+                    assigned_to INTEGER,
+                    created_by INTEGER NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS info_entries (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    module TEXT NOT NULL CHECK(module IN ('news','info')),
+                    category TEXT,
+                    title TEXT NOT NULL,
+                    body TEXT NOT NULL,
+                    created_by INTEGER NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS mirror_sources (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    kind TEXT NOT NULL CHECK(kind IN ('news','info')),
+                    source_chat_id INTEGER NOT NULL,
+                    source_thread_id INTEGER NOT NULL DEFAULT 0,
+                    dest_chat_id INTEGER NOT NULL,
+                    dest_thread_id INTEGER NOT NULL DEFAULT 0,
+                    enabled INTEGER NOT NULL DEFAULT 1,
+                    created_by INTEGER NOT NULL,
+                    created_at TEXT NOT NULL,
+                    UNIQUE(kind, source_chat_id, source_thread_id)
+                );
+                CREATE TABLE IF NOT EXISTS audit_log (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    actor_id INTEGER,
+                    action TEXT NOT NULL,
+                    details TEXT,
+                    created_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_events_status_start ON events(status, starts_at);
+                CREATE INDEX IF NOT EXISTS idx_targets_status ON targets(status, id DESC);
+                CREATE INDEX IF NOT EXISTS idx_diplomacy_history ON diplomacy_history(id DESC);
+                CREATE INDEX IF NOT EXISTS idx_info_module ON info_entries(module, id DESC);
+                CREATE INDEX IF NOT EXISTS idx_mirror_source ON mirror_sources(source_chat_id, source_thread_id, enabled);
+                """
+            )
+            cur = await db.execute("PRAGMA table_info(market_orders)")
+            market_columns = {row[1] for row in await cur.fetchall()}
+            if "delivery_chat_id" not in market_columns:
+                await db.execute("ALTER TABLE market_orders ADD COLUMN delivery_chat_id INTEGER")
+            if "delivery_thread_id" not in market_columns:
+                await db.execute("ALTER TABLE market_orders ADD COLUMN delivery_thread_id INTEGER")
+            if "delivery_message_id" not in market_columns:
+                await db.execute("ALTER TABLE market_orders ADD COLUMN delivery_message_id INTEGER")
             await db.commit()
 
     async def upsert_player(
@@ -815,3 +944,369 @@ class Database:
             )
             await db.commit()
             return cur.rowcount > 0
+
+
+    # ------------------------------------------------------------------
+    # v7 generic topics and multitask modules
+    # ------------------------------------------------------------------
+    # -------------------- transient message cleanup --------------------
+    async def add_ephemeral_message(self, chat_id: int, message_id: int, delete_after: str) -> None:
+        async with aiosqlite.connect(self.path) as db:
+            await db.execute(
+                "INSERT OR REPLACE INTO ephemeral_messages(chat_id,message_id,delete_after,created_at) VALUES(?,?,?,?)",
+                (int(chat_id), int(message_id), delete_after, utc_now()),
+            )
+            await db.commit()
+
+    async def remove_ephemeral_message(self, chat_id: int, message_id: int) -> None:
+        async with aiosqlite.connect(self.path) as db:
+            await db.execute("DELETE FROM ephemeral_messages WHERE chat_id=? AND message_id=?", (int(chat_id), int(message_id)))
+            await db.commit()
+
+    async def list_due_ephemeral_messages(self, now_iso: str, limit: int = 200) -> list[tuple[int, int]]:
+        async with aiosqlite.connect(self.path) as db:
+            cur = await db.execute(
+                "SELECT chat_id,message_id FROM ephemeral_messages WHERE delete_after<=? ORDER BY delete_after ASC LIMIT ?",
+                (now_iso, int(limit)),
+            )
+            return [(int(r[0]), int(r[1])) for r in await cur.fetchall()]
+
+    async def list_all_ephemeral_messages(self, limit: int = 2000) -> list[tuple[int, int]]:
+        async with aiosqlite.connect(self.path) as db:
+            cur = await db.execute(
+                "SELECT chat_id,message_id FROM ephemeral_messages ORDER BY delete_after ASC LIMIT ?", (int(limit),)
+            )
+            return [(int(r[0]), int(r[1])) for r in await cur.fetchall()]
+
+    async def set_topic(self, code: str, chat_id: int, thread_id: int) -> None:
+        await self.set_setting(f"topic:{code}:chat", str(chat_id))
+        await self.set_setting(f"topic:{code}:thread", str(int(thread_id or 0)))
+
+    async def get_topic(self, code: str) -> tuple[int, int] | None:
+        chat = await self.get_setting(f"topic:{code}:chat")
+        thread = await self.get_setting(f"topic:{code}:thread")
+        if chat is None or thread is None:
+            # compatibility with v6 topic keys
+            legacy = {
+                "general": self.get_general_topic,
+                "nicks": self.get_nicks_topic,
+                "storage": self.get_storage_topic,
+                "market": self.get_market_topic,
+            }.get(code)
+            return await legacy() if legacy else None
+        try:
+            return int(chat), int(thread)
+        except ValueError:
+            return None
+
+    async def list_topics(self) -> dict[str, tuple[int, int]]:
+        codes = ("general","nicks","storage","market","delivery","gp_stock","events","diplomacy","targets","news","info","bar")
+        result = {}
+        for code in codes:
+            topic = await self.get_topic(code)
+            if topic:
+                result[code] = topic
+        return result
+
+    async def audit(self, actor_id: int | None, action: str, details: str | None = None) -> None:
+        async with aiosqlite.connect(self.path) as db:
+            await db.execute("INSERT INTO audit_log(actor_id,action,details,created_at) VALUES(?,?,?,?)", (actor_id, action, details, utc_now()))
+            await db.commit()
+
+    async def list_audit(self, limit: int = 30) -> list[dict]:
+        async with aiosqlite.connect(self.path) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute("SELECT * FROM audit_log ORDER BY id DESC LIMIT ?", (limit,))
+            return [dict(r) for r in await cur.fetchall()]
+
+    async def gp_stock_upsert(self, item_name: str, quantity: int, actor_id: int) -> None:
+        name = item_name.strip()
+        qty = max(0, int(quantity))
+        async with aiosqlite.connect(self.path) as db:
+            cur = await db.execute("SELECT reserved FROM gp_stock WHERE item_name=? COLLATE NOCASE", (name,))
+            row = await cur.fetchone()
+            reserved = int(row[0]) if row else 0
+            if qty < reserved:
+                raise ValueError(f"Нельзя установить {qty}: уже зарезервировано {reserved}")
+            await db.execute(
+                """INSERT INTO gp_stock(item_name,quantity,reserved,updated_by,updated_at) VALUES(?,?,0,?,?)
+                   ON CONFLICT(item_name) DO UPDATE SET quantity=excluded.quantity, updated_by=excluded.updated_by, updated_at=excluded.updated_at""",
+                (name, qty, actor_id, utc_now()),
+            )
+            await db.commit()
+        await self.audit(actor_id, "gp_stock.set", f"{name}={qty}")
+
+    async def gp_stock_delta(self, item_name: str, delta: int, actor_id: int) -> int:
+        name = item_name.strip()
+        async with aiosqlite.connect(self.path) as db:
+            cur = await db.execute("SELECT quantity,reserved FROM gp_stock WHERE item_name=? COLLATE NOCASE", (name,))
+            row = await cur.fetchone()
+            current = int(row[0]) if row else 0
+            reserved = int(row[1]) if row else 0
+            new_qty = max(0, current + int(delta))
+            if new_qty < reserved:
+                raise ValueError(f"Нельзя уменьшить ниже резерва {reserved}")
+            await db.execute(
+                """INSERT INTO gp_stock(item_name,quantity,reserved,updated_by,updated_at) VALUES(?,?,0,?,?)
+                   ON CONFLICT(item_name) DO UPDATE SET quantity=excluded.quantity, updated_by=excluded.updated_by, updated_at=excluded.updated_at""",
+                (name, new_qty, actor_id, utc_now()),
+            )
+            await db.commit()
+        await self.audit(actor_id, "gp_stock.delta", f"{name} {delta:+d} => {new_qty}")
+        return new_qty
+
+    async def gp_stock_list(self, limit: int = 100) -> list[dict]:
+        async with aiosqlite.connect(self.path) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute("SELECT * FROM gp_stock ORDER BY item_name COLLATE NOCASE LIMIT ?", (limit,))
+            rows = [dict(r) for r in await cur.fetchall()]
+            for row in rows:
+                row["available"] = max(0, int(row.get("quantity") or 0) - int(row.get("reserved") or 0))
+            return rows
+
+    async def gp_stock_check(self, items: list[tuple[str, int]]) -> list[tuple[str, int, int]]:
+        """Return shortages against *available* stock (quantity - reserved)."""
+        shortages: list[tuple[str, int, int]] = []
+        aggregated = _aggregate_items(items)
+        async with aiosqlite.connect(self.path) as db:
+            for name, need in aggregated:
+                cur = await db.execute("SELECT quantity,reserved FROM gp_stock WHERE item_name=? COLLATE NOCASE", (name,))
+                row = await cur.fetchone()
+                have = (int(row[0]) - int(row[1])) if row else 0
+                have = max(0, have)
+                if have < need:
+                    shortages.append((name, need, have))
+        return shortages
+
+    async def gp_stock_reserve(self, items: list[tuple[str, int]], actor_id: int) -> tuple[bool, list[tuple[str, int, int]]]:
+        aggregated = _aggregate_items(items)
+        async with aiosqlite.connect(self.path) as db:
+            await db.execute("BEGIN IMMEDIATE")
+            shortages: list[tuple[str, int, int]] = []
+            for name, need in aggregated:
+                cur = await db.execute("SELECT quantity,reserved FROM gp_stock WHERE item_name=? COLLATE NOCASE", (name,))
+                row = await cur.fetchone()
+                available = max(0, (int(row[0]) - int(row[1])) if row else 0)
+                if available < need:
+                    shortages.append((name, need, available))
+            if shortages:
+                await db.rollback()
+                return False, shortages
+            for name, need in aggregated:
+                await db.execute(
+                    "UPDATE gp_stock SET reserved=reserved+?, updated_by=?, updated_at=? WHERE item_name=? COLLATE NOCASE",
+                    (need, actor_id, utc_now(), name),
+                )
+            await db.commit()
+        await self.audit(actor_id, "gp_stock.reserve", "; ".join(f"{n}x{q}" for n, q in aggregated))
+        return True, []
+
+    async def gp_stock_release(self, items: list[tuple[str, int]], actor_id: int) -> None:
+        aggregated = _aggregate_items(items)
+        async with aiosqlite.connect(self.path) as db:
+            await db.execute("BEGIN IMMEDIATE")
+            for name, qty in aggregated:
+                await db.execute(
+                    "UPDATE gp_stock SET reserved=MAX(0,reserved-?), updated_by=?, updated_at=? WHERE item_name=? COLLATE NOCASE",
+                    (qty, actor_id, utc_now(), name),
+                )
+            await db.commit()
+        await self.audit(actor_id, "gp_stock.release", "; ".join(f"{n}x{q}" for n, q in aggregated))
+
+    async def gp_stock_consume_reserved(self, items: list[tuple[str, int]], actor_id: int) -> tuple[bool, list[tuple[str, int, int]]]:
+        """Consume quantities that were reserved when the order was accepted."""
+        aggregated = _aggregate_items(items)
+        async with aiosqlite.connect(self.path) as db:
+            await db.execute("BEGIN IMMEDIATE")
+            shortages: list[tuple[str, int, int]] = []
+            for name, need in aggregated:
+                cur = await db.execute("SELECT quantity,reserved FROM gp_stock WHERE item_name=? COLLATE NOCASE", (name,))
+                row = await cur.fetchone()
+                qty = int(row[0]) if row else 0
+                reserved = int(row[1]) if row else 0
+                usable = min(qty, reserved)
+                if usable < need:
+                    shortages.append((name, need, usable))
+            if shortages:
+                await db.rollback()
+                return False, shortages
+            for name, need in aggregated:
+                await db.execute(
+                    "UPDATE gp_stock SET quantity=quantity-?, reserved=reserved-?, updated_by=?, updated_at=? WHERE item_name=? COLLATE NOCASE",
+                    (need, need, actor_id, utc_now(), name),
+                )
+            await db.commit()
+        await self.audit(actor_id, "gp_stock.consume_reserved", "; ".join(f"{n}x{q}" for n, q in aggregated))
+        return True, []
+
+    async def gp_stock_consume(self, items: list[tuple[str, int]], actor_id: int) -> tuple[bool, list[tuple[str, int, int]]]:
+        """Compatibility path for unreserved direct consumption."""
+        shortages = await self.gp_stock_check(items)
+        if shortages:
+            return False, shortages
+        aggregated = _aggregate_items(items)
+        async with aiosqlite.connect(self.path) as db:
+            await db.execute("BEGIN IMMEDIATE")
+            for name, qty in aggregated:
+                await db.execute(
+                    "UPDATE gp_stock SET quantity=quantity-?, updated_by=?, updated_at=? WHERE item_name=? COLLATE NOCASE",
+                    (qty, actor_id, utc_now(), name),
+                )
+            await db.commit()
+        await self.audit(actor_id, "gp_stock.consume", "; ".join(f"{n}x{q}" for n, q in aggregated))
+        return True, []
+
+    async def create_event(self, title: str, details: str | None, starts_at: str, capacity: int, actor_id: int, chat_id: int, thread_id: int) -> int:
+        async with aiosqlite.connect(self.path) as db:
+            cur = await db.execute(
+                "INSERT INTO events(title,details,starts_at,capacity,created_by,created_at,chat_id,thread_id) VALUES(?,?,?,?,?,?,?,?)",
+                (title.strip(), details.strip() if details else None, starts_at, max(0,capacity), actor_id, utc_now(), chat_id, thread_id),
+            )
+            await db.commit()
+            eid=int(cur.lastrowid)
+        await self.audit(actor_id, "event.create", f"#{eid} {title}")
+        return eid
+
+    async def set_event_message(self, event_id: int, message_id: int) -> None:
+        async with aiosqlite.connect(self.path) as db:
+            await db.execute("UPDATE events SET message_id=? WHERE id=?", (message_id,event_id)); await db.commit()
+
+    async def get_event(self, event_id: int) -> dict | None:
+        async with aiosqlite.connect(self.path) as db:
+            db.row_factory=aiosqlite.Row
+            cur=await db.execute("SELECT * FROM events WHERE id=?",(event_id,)); row=await cur.fetchone()
+            if not row: return None
+            data=dict(row)
+            cur=await db.execute("SELECT user_id,status FROM event_participants WHERE event_id=? ORDER BY joined_at",(event_id,))
+            data["participants"]=[dict(r) for r in await cur.fetchall()]
+            return data
+
+    async def list_events(self, limit: int = 20) -> list[dict]:
+        async with aiosqlite.connect(self.path) as db:
+            db.row_factory=aiosqlite.Row
+            cur=await db.execute("SELECT * FROM events WHERE status IN ('open','closed') ORDER BY starts_at LIMIT ?",(limit,))
+            return [dict(r) for r in await cur.fetchall()]
+
+    async def event_join(self, event_id: int, user_id: int, join: bool=True) -> bool:
+        event=await self.get_event(event_id)
+        if not event or event["status"] != "open": return False
+        if join and event["capacity"]:
+            joined=sum(1 for x in event["participants"] if x["status"]=='joined')
+            existing=next((x for x in event["participants"] if x["user_id"]==user_id and x["status"]=='joined'),None)
+            if joined >= event["capacity"] and not existing: return False
+        async with aiosqlite.connect(self.path) as db:
+            if join:
+                await db.execute("INSERT INTO event_participants(event_id,user_id,status,joined_at) VALUES(?,?,'joined',?) ON CONFLICT(event_id,user_id) DO UPDATE SET status='joined', joined_at=excluded.joined_at",(event_id,user_id,utc_now()))
+            else:
+                await db.execute("DELETE FROM event_participants WHERE event_id=? AND user_id=?",(event_id,user_id))
+            await db.commit()
+        return True
+
+    async def event_set_status(self, event_id: int, status: str, actor_id: int) -> bool:
+        if status not in {"open","closed","cancelled","done"}: return False
+        async with aiosqlite.connect(self.path) as db:
+            cur=await db.execute("UPDATE events SET status=? WHERE id=?",(status,event_id)); await db.commit()
+        if cur.rowcount: await self.audit(actor_id,"event.status",f"#{event_id} {status}")
+        return cur.rowcount>0
+
+    async def diplomacy_set(self, faction: str, relation: str, note: str | None, actor_id: int) -> None:
+        if relation not in {"ally", "neutral", "war"}:
+            raise ValueError("bad relation")
+        faction_name = faction.strip()
+        clean_note = note.strip() if note else None
+        now = utc_now()
+        async with aiosqlite.connect(self.path) as db:
+            await db.execute("BEGIN IMMEDIATE")
+            await db.execute(
+                """INSERT INTO diplomacy_records(faction_name,relation,note,updated_by,updated_at) VALUES(?,?,?,?,?)
+                ON CONFLICT(faction_name) DO UPDATE SET relation=excluded.relation,note=excluded.note,updated_by=excluded.updated_by,updated_at=excluded.updated_at""",
+                (faction_name, relation, clean_note, actor_id, now),
+            )
+            await db.execute(
+                "INSERT INTO diplomacy_history(faction_name,relation,note,changed_by,changed_at) VALUES(?,?,?,?,?)",
+                (faction_name, relation, clean_note, actor_id, now),
+            )
+            await db.commit()
+        await self.audit(actor_id, "diplomacy.set", f"{faction_name}={relation}")
+
+    async def diplomacy_list(self) -> list[dict]:
+        async with aiosqlite.connect(self.path) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute("SELECT * FROM diplomacy_records ORDER BY faction_name COLLATE NOCASE")
+            return [dict(r) for r in await cur.fetchall()]
+
+    async def diplomacy_history(self, limit: int = 30) -> list[dict]:
+        async with aiosqlite.connect(self.path) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute("SELECT * FROM diplomacy_history ORDER BY id DESC LIMIT ?", (limit,))
+            return [dict(r) for r in await cur.fetchall()]
+
+    async def target_create(self, name: str, reason: str | None, reward: str | None, location: str | None, actor_id: int) -> int:
+        now=utc_now()
+        async with aiosqlite.connect(self.path) as db:
+            cur=await db.execute("INSERT INTO targets(target_name,reason,reward,last_location,status,created_by,created_at,updated_at) VALUES(?,?,?,?,'active',?,?,?)",(name.strip(),reason,reward,location,actor_id,now,now)); await db.commit(); tid=int(cur.lastrowid)
+        await self.audit(actor_id,"target.create",f"#{tid} {name}")
+        return tid
+
+    async def target_list(self, limit: int=30) -> list[dict]:
+        async with aiosqlite.connect(self.path) as db:
+            db.row_factory=aiosqlite.Row
+            cur=await db.execute("SELECT * FROM targets WHERE status!='cancelled' ORDER BY CASE status WHEN 'active' THEN 0 WHEN 'taken' THEN 1 ELSE 2 END,id DESC LIMIT ?",(limit,))
+            return [dict(r) for r in await cur.fetchall()]
+
+    async def target_set_status(self, target_id: int, status: str, actor_id: int, assigned_to: int | None=None) -> bool:
+        if status not in {"active","taken","done","cancelled"}: return False
+        async with aiosqlite.connect(self.path) as db:
+            cur=await db.execute("UPDATE targets SET status=?,assigned_to=?,updated_at=? WHERE id=?",(status,assigned_to,utc_now(),target_id)); await db.commit()
+        if cur.rowcount: await self.audit(actor_id,"target.status",f"#{target_id} {status}")
+        return cur.rowcount>0
+
+    async def info_add(self, module: str, title: str, body: str, actor_id: int, category: str | None=None) -> int:
+        if module not in {"news","info"}: raise ValueError("bad module")
+        async with aiosqlite.connect(self.path) as db:
+            cur=await db.execute("INSERT INTO info_entries(module,category,title,body,created_by,created_at) VALUES(?,?,?,?,?,?)",(module,category,title.strip(),body.strip(),actor_id,utc_now())); await db.commit(); iid=int(cur.lastrowid)
+        await self.audit(actor_id,f"{module}.add",f"#{iid} {title}")
+        return iid
+
+    async def info_list(self, module: str, limit: int=20) -> list[dict]:
+        async with aiosqlite.connect(self.path) as db:
+            db.row_factory=aiosqlite.Row
+            cur=await db.execute("SELECT * FROM info_entries WHERE module=? ORDER BY id DESC LIMIT ?",(module,limit))
+            return [dict(r) for r in await cur.fetchall()]
+
+    async def mirror_set(self, kind: str, source_chat_id: int, source_thread_id: int, dest_chat_id: int, dest_thread_id: int, actor_id: int) -> None:
+        async with aiosqlite.connect(self.path) as db:
+            await db.execute("""INSERT INTO mirror_sources(kind,source_chat_id,source_thread_id,dest_chat_id,dest_thread_id,enabled,created_by,created_at)
+                VALUES(?,?,?,?,?,1,?,?) ON CONFLICT(kind,source_chat_id,source_thread_id) DO UPDATE SET dest_chat_id=excluded.dest_chat_id,dest_thread_id=excluded.dest_thread_id,enabled=1,created_by=excluded.created_by,created_at=excluded.created_at""",
+                (kind,source_chat_id,int(source_thread_id or 0),dest_chat_id,int(dest_thread_id or 0),actor_id,utc_now()))
+            await db.commit()
+        await self.audit(actor_id,"mirror.set",f"{kind} {source_chat_id}/{source_thread_id}->{dest_chat_id}/{dest_thread_id}")
+
+    async def mirror_sources_for(self, chat_id: int, thread_id: int) -> list[dict]:
+        async with aiosqlite.connect(self.path) as db:
+            db.row_factory=aiosqlite.Row
+            cur=await db.execute("SELECT * FROM mirror_sources WHERE source_chat_id=? AND source_thread_id=? AND enabled=1",(chat_id,int(thread_id or 0)))
+            return [dict(r) for r in await cur.fetchall()]
+
+    async def mirror_list(self) -> list[dict]:
+        async with aiosqlite.connect(self.path) as db:
+            db.row_factory=aiosqlite.Row
+            cur=await db.execute("SELECT * FROM mirror_sources WHERE enabled=1 ORDER BY id DESC")
+            return [dict(r) for r in await cur.fetchall()]
+
+    async def set_market_delivery_message(self, order_id: int, chat_id: int, thread_id: int, message_id: int) -> None:
+        async with aiosqlite.connect(self.path) as db:
+            await db.execute("UPDATE market_orders SET delivery_chat_id=?,delivery_thread_id=?,delivery_message_id=? WHERE id=?",(chat_id,thread_id,message_id,order_id)); await db.commit()
+
+    async def get_market_delivery_ref(self, order_id: int) -> tuple[int,int,int] | None:
+        async with aiosqlite.connect(self.path) as db:
+            cur=await db.execute("SELECT delivery_chat_id,delivery_thread_id,delivery_message_id FROM market_orders WHERE id=?",(order_id,)); row=await cur.fetchone()
+            if not row or not row[0] or not row[2]: return None
+            return int(row[0]),int(row[1] or 0),int(row[2])
+
+    async def target_get(self, target_id: int) -> dict | None:
+        async with aiosqlite.connect(self.path) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute("SELECT * FROM targets WHERE id=?", (target_id,))
+            row = await cur.fetchone()
+            return dict(row) if row else None

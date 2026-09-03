@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from telethon import TelegramClient
+from telethon.tl import functions
 from telethon.errors import (
     FloodWaitError,
     PhoneCodeExpiredError,
@@ -273,3 +274,25 @@ class TelethonManager:
             normalized = int(normalized)
         entity = await self.client.get_entity(normalized)
         await self.client.send_message(entity, text, parse_mode="html")
+
+    async def list_forum_topics(self, chat_id: int) -> list[tuple[str, int]]:
+        """Return forum topic titles and root message ids for a supergroup."""
+        if not await self.is_connected() or not self.client:
+            raise RuntimeError("Telethon не подключён.")
+        await self.client.get_dialogs(limit=None)
+        entity = await self.client.get_entity(chat_id)
+        result = await self.client(functions.channels.GetForumTopicsRequest(
+            channel=entity,
+            offset_date=None,
+            offset_id=0,
+            offset_topic=0,
+            limit=100,
+            q="",
+        ))
+        topics = []
+        for topic in getattr(result, "topics", []):
+            title = str(getattr(topic, "title", "") or "").strip()
+            tid = int(getattr(topic, "id", 0) or 0)
+            if title and tid:
+                topics.append((title, tid))
+        return topics

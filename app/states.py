@@ -52,3 +52,32 @@ class GroupMarketOrder(StatesGroup):
 
 class GroupMarketSettings(StatesGroup):
     merchant_target = State()
+
+class GroupGpStock(StatesGroup):
+    item_name = State()
+    quantity = State()
+
+
+class GroupEventCreate(StatesGroup):
+    title = State()
+    starts_at = State()
+    capacity = State()
+    details = State()
+
+
+class GroupDiplomacy(StatesGroup):
+    faction = State()
+    relation = State()
+    note = State()
+
+
+class GroupTargetCreate(StatesGroup):
+    name = State()
+    reason = State()
+    reward = State()
+    location = State()
+
+
+class GroupInfoCreate(StatesGroup):
+    title = State()
+    body = State()
