@@ -6,7 +6,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 def main_menu(admin: bool) -> ReplyKeyboardMarkup:
     rows = [
-        [KeyboardButton(text="📦 Хранилище"), KeyboardButton(text="🛒 Рынок ГП")],
+        [KeyboardButton(text="🎒 Снаряжение группировки"), KeyboardButton(text="🛒 Рынок ГП")],
         [KeyboardButton(text="👤 Мой профиль"), KeyboardButton(text="👥 Игроки")],
     ]
     if admin:
@@ -303,7 +303,7 @@ def market_order_status_keyboard(order_id: int, workflow_status: str) -> InlineK
 def group_admin_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="📦 Хранилище", callback_data="gadmin:storage")],
+            [InlineKeyboardButton(text="🎒 Снаряжение группировки", callback_data="gadmin:storage")],
             [InlineKeyboardButton(text="👥 Ники игроков", callback_data="gadmin:nicks")],
             [InlineKeyboardButton(text="🎖 Роли и доступ", callback_data="gadmin:roles")],
             [InlineKeyboardButton(text="🛒 Рынок ГП", callback_data="gadmin:market")],
@@ -318,7 +318,7 @@ def group_admin_back() -> InlineKeyboardMarkup:
     )
 
 
-def group_telethon_menu(*, connected: bool, bot_username: str, can_manage: bool, can_sync: bool) -> InlineKeyboardMarkup:
+def group_telethon_menu(*, connected: bool, can_manage: bool, can_sync: bool, bot_username: str | None = None) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
     if connected:
         if can_sync:
@@ -326,17 +326,17 @@ def group_telethon_menu(*, connected: bool, bot_username: str, can_manage: bool,
         if can_manage:
             rows.append([InlineKeyboardButton(text="🗑 Отключить Telethon", callback_data="gtelethon:disconnect")])
     elif can_manage:
-        rows.append([InlineKeyboardButton(text="🔗 Подключить безопасно в личке", url=f"https://t.me/{bot_username}?start=telethon")])
+        rows.append([InlineKeyboardButton(text="🪟 Открыть окно авторизации", callback_data="gtelethon:web_auth")])
     rows.append([InlineKeyboardButton(text="↩️ Назад", callback_data="gadmin:home")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def group_nicks_admin_menu(*, connected: bool, bot_username: str, can_manage: bool, topic_ready: bool) -> InlineKeyboardMarkup:
+def group_nicks_admin_menu(*, connected: bool, can_manage: bool, topic_ready: bool, bot_username: str | None = None) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
     if connected and topic_ready:
         rows.append([InlineKeyboardButton(text="🔄 Импортировать старые ники", callback_data="telethon:sync_nicks")])
     elif not connected and can_manage:
-        rows.append([InlineKeyboardButton(text="🔐 Подключить Telethon", url=f"https://t.me/{bot_username}?start=telethon")])
+        rows.append([InlineKeyboardButton(text="🪟 Авторизовать Telethon", callback_data="gtelethon:web_auth")])
     rows.append([InlineKeyboardButton(text="↩️ Назад", callback_data="gadmin:home")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 

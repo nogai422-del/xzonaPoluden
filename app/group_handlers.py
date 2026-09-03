@@ -35,6 +35,7 @@ from .keyboards import (
 from .roles import has_position_permission, is_external_position, parse_position, position_display
 from .states import GroupAddItem, GroupMarketOrder, GroupMarketSettings
 from .telethon_manager import TelethonManager
+from .telethon_web import TelethonWebAuth
 
 router = Router(name="group_first")
 GROUP_TYPES = {"group", "supergroup"}
@@ -288,7 +289,7 @@ async def set_storage_topic_group(message: Message, db: Database, config: Config
         return
     topic = topic_tuple_from_message(message)
     if not topic:
-        await message.answer("Отправьте /set_storage_topic прямо внутри темы «Хранилище».")
+        await message.answer("Отправьте /set_storage_topic прямо внутри темы «Снаряжение группировки».")
         return
     await db.set_storage_topic(*topic)
     await message.answer(
@@ -398,7 +399,7 @@ async def nicks_status_group(message: Message, db: Database, config: Config, bot
 
 
 # ---------------------------------------------------------------------------
-# Group admin dashboard. Telethon secrets still go through private chat only.
+# Group admin dashboard. Telethon secrets are entered in a browser window.
 # ---------------------------------------------------------------------------
 
 async def group_admin_text(db: Database, telethon: TelethonManager) -> str:
@@ -412,7 +413,7 @@ async def group_admin_text(db: Database, telethon: TelethonManager) -> str:
     return (
         "<b>⚙️ УПРАВЛЕНИЕ ГРУППОЙ</b>\n\n"
         f"💬 General: {'✅' if general else '⚠️ не назначено'}\n"
-        f"📦 Хранилище: {'✅' if storage else '⚠️ не назначено'}\n"
+        f"🎒 Снаряжение группировки: {'✅' if storage else '⚠️ не назначено'}\n"
         f"👥 Ники игроков: {'✅' if nicks else '⚠️ не назначено'}\n"
         f"🎖 Запросов должностей: <b>{pending_roles}</b>\n"
         f"🛒 Рынок ГП: {'✅' if market else '⚠️ не назначено'}\n"
@@ -498,10 +499,10 @@ async def group_admin_storage(callback: CallbackQuery, db: Database, config: Con
     topic = await db.get_storage_topic()
     count, players = await db.storage_stats()
     text = (
-        "<b>📦 Хранилище</b>\n\n"
+        "<b>🎒 Снаряжение группировки</b>\n\n"
         f"Тема: {'✅ настроена' if topic else '⚠️ не настроена'}\n"
         f"На хранении: <b>{count}</b>\nИгроков с имуществом: <b>{players}</b>\n\n"
-        "Для привязки откройте тему Хранилище и отправьте <code>/set_storage_topic</code>."
+        "Для привязки откройте тему «Снаряжение группировки» и отправьте <code>/set_storage_topic</code>."
     )
     await callback.message.edit_text(text, reply_markup=group_admin_back())
     await callback.answer()
@@ -630,7 +631,7 @@ async def group_admin_telethon(callback: CallbackQuery, db: Database, config: Co
         f"Статус: {'🟢 подключён' if connected else '🔴 не подключён'}\n"
         f"Аккаунт: <code>{escape(telethon.masked_phone())}</code>\n\n"
         "Через Telethon бот один раз дочитывает старые ники и при необходимости отправляет заказы Торговцу.\n\n"
-        "API HASH, код входа и 2FA никогда не вводятся в общей группе. Подключение открывается в личном чате только владельцу."
+        "API HASH, код входа и 2FA вводятся в отдельном браузерном окне. Одноразовую ссылку может создать только владелец."
     )
     await callback.message.edit_text(
         text,
@@ -642,6 +643,42 @@ async def group_admin_telethon(callback: CallbackQuery, db: Database, config: Co
         ),
     )
     await callback.answer()
+
+
+@router.callback_query(F.data == "gtelethon:web_auth", F.message.chat.type.in_(GROUP_TYPES))
+async def group_telethon_web_auth(
+    callback: CallbackQuery,
+    config: Config,
+    bot: Bot,
+    telethon: TelethonManager,
+    telethon_web: TelethonWebAuth,
+):
+    if not can_manage_telethon(callback.from_user.id, config):
+        await callback.answer("Окно авторизации доступно только владельцу.", show_alert=True)
+        return
+    if await telethon.is_connected():
+        await callback.answer("Telethon уже подключён.", show_alert=True)
+        return
+    url = telethon_web.create_login_url(callback.from_user.id)
+    markup = InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="🪟 Открыть авторизацию Telethon", url=url)]]
+    )
+    try:
+        await bot.send_message(
+            callback.from_user.id,
+            "🔐 <b>Одноразовое окно авторизации Telethon</b>\n\n"
+            "Ссылка действует ограниченное время. В окне последовательно вводятся API ID, API HASH, телефон, "
+            "код Telegram и, если включён, пароль 2FA.\n\n"
+            "После успешного входа вернитесь в группу и нажмите «Импортировать старые ники».",
+            reply_markup=markup,
+        )
+    except (TelegramForbiddenError, TelegramBadRequest):
+        await callback.answer(
+            "Не могу отправить защищённую ссылку. Один раз откройте личный чат с ботом и нажмите /start, затем повторите.",
+            show_alert=True,
+        )
+        return
+    await callback.answer("Одноразовая ссылка отправлена вам в личный чат.", show_alert=True)
 
 
 @router.callback_query(F.data == "gtelethon:disconnect", F.message.chat.type.in_(GROUP_TYPES))
@@ -688,7 +725,7 @@ async def group_storage_add(callback: CallbackQuery, db: Database, state: FSMCon
     if not await require_permission_callback(callback, "storage.manage", db, config, "Принимать предметы может Кладовщик, Лидер или Заместитель."):
         return
     topic = await db.get_storage_topic()
-    if not await require_configured_topic(callback, topic, "Хранилище"):
+    if not await require_configured_topic(callback, topic, "Снаряжение группировки"):
         return
     await state.clear()
     await state.update_data(flow_chat_id=topic[0], flow_thread_id=topic[1])
@@ -758,7 +795,7 @@ async def group_storage_name(message: Message, db: Database, state: FSMContext, 
     if not message.from_user or not await has_permission(message.from_user.id, "storage.manage", db, config):
         return
     if not await flow_matches_message(message, state):
-        await message.answer("Продолжите добавление предмета в теме Хранилище.")
+        await message.answer("Продолжите добавление предмета в теме «Снаряжение группировки».")
         return
     name = (message.text or "").strip()
     if not 1 <= len(name) <= 80:
@@ -794,7 +831,7 @@ async def group_storage_qty_text(message: Message, db: Database, state: FSMConte
     if not message.from_user or not await has_permission(message.from_user.id, "storage.manage", db, config):
         return
     if not await flow_matches_message(message, state):
-        await message.answer("Продолжите добавление предмета в теме Хранилище.")
+        await message.answer("Продолжите добавление предмета в теме «Снаряжение группировки».")
         return
     raw = (message.text or "").strip()
     if not raw.isdigit() or not 1 <= int(raw) <= 9999:
@@ -842,7 +879,7 @@ async def group_storage_comment(message: Message, db: Database, state: FSMContex
     if not message.from_user or not await has_permission(message.from_user.id, "storage.manage", db, config):
         return
     if not await flow_matches_message(message, state):
-        await message.answer("Продолжите добавление предмета в теме Хранилище.")
+        await message.answer("Продолжите добавление предмета в теме «Снаряжение группировки».")
         return
     comment = (message.text or "").strip()
     if len(comment) > 500:
@@ -881,7 +918,7 @@ async def group_storage_list(callback: CallbackQuery, db: Database, config: Conf
     if not await require_permission_callback(callback, "storage.view", db, config, "Этот раздел доступен участникам Полдня."):
         return
     topic = await db.get_storage_topic()
-    if not await require_configured_topic(callback, topic, "Хранилище"):
+    if not await require_configured_topic(callback, topic, "Снаряжение группировки"):
         return
     status = "stored" if callback.data == "gstorage:list" else "issued"
     items = await db.list_storage_items(status=status, limit=30)
@@ -1315,13 +1352,13 @@ async def group_flow_cancel(callback: CallbackQuery, state: FSMContext):
 
 
 # Optional text shortcuts if admins/users still have an old reply keyboard.
-@router.message(F.text == "📦 Хранилище", F.chat.type.in_(GROUP_TYPES))
+@router.message(F.text == "🎒 Снаряжение группировки", F.chat.type.in_(GROUP_TYPES))
 async def group_storage_text_shortcut(message: Message, db: Database):
     if topic_tuple_from_message(message) != await db.get_storage_topic():
         return
     count, players = await db.storage_stats()
     await message.answer(
-        f"<b>📦 Хранилище</b>\n\nНа хранении: <b>{count}</b>\nИгроков: <b>{players}</b>",
+        f"<b>🎒 Снаряжение группировки</b>\n\nНа хранении: <b>{count}</b>\nИгроков: <b>{players}</b>",
         reply_markup=group_storage_panel(),
     )
 

@@ -9,7 +9,7 @@ from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from .config import Config
 from .db import Database, MarketOrder as DbMarketOrder, MarketOrderItem, StorageItem
@@ -37,6 +37,7 @@ from .nicks import extract_nickname
 from .roles import allowed_position_lines, has_position_permission, parse_profile, position_display
 from .states import AddItem, EditItem, MarketOrder, MarketSettings, RegisterPlayer, TelethonSetup
 from .telethon_manager import TelethonManager
+from .telethon_web import TelethonWebAuth
 
 router = Router()
 
@@ -275,8 +276,7 @@ async def set_nicks_topic(message: Message, db: Database, config: Config):
     await message.answer(
         "✅ Эта тема назначена источником ников.\n\n"
         "Новые сообщения игроков будут сохраняться автоматически.\n\n"
-        "📚 Старые ники импортируются без отдельного скрипта: откройте личный чат с ботом → "
-        "⚙️ Администрирование → 👥 Ники игроков → 🔄 Импортировать старые ники."
+        "📚 Старые ники импортируются без отдельного скрипта: /admin в группе → 👥 Ники игроков → 🔄 Импортировать старые ники."
     )
 
 
@@ -292,7 +292,7 @@ async def set_market_topic(message: Message, db: Database, config: Config, bot: 
     me = await bot.get_me()
     await message.answer(
         "✅ Эта тема назначена как <b>Рынок ГП</b>.\n\n"
-        "Заказы оформляются в личном чате с ботом и отправляются Торговцу ГП.",
+        "Заказы оформляются прямо в этой теме и отправляются Торговцу ГП.",
         reply_markup=market_topic_panel(me.username),
     )
 
@@ -358,46 +358,46 @@ async def sync_edited_nickname(message: Message, db: Database):
 # ---------------------------------------------------------------------------
 
 @router.message(CommandStart())
-async def start(message: Message, db: Database, state: FSMContext, config: Config):
+async def start(
+    message: Message,
+    db: Database,
+    state: FSMContext,
+    config: Config,
+    telethon_web: TelethonWebAuth,
+):
     payload = ""
     parts = (message.text or "").split(maxsplit=1)
     if len(parts) == 2:
         payload = parts[1].strip().lower()
 
+    # Compatibility with links created by older versions: instead of asking
+    # for secrets in chat, issue a short-lived browser link.
     if payload == "telethon":
         if not can_manage_telethon(message.from_user.id, config):
             await message.answer("Настройка Telethon доступна только владельцу бота.")
             return
         if message.chat.type != "private":
-            await message.answer("Подключение Telethon выполняется только в личном чате с ботом.")
+            await message.answer("Откройте личный чат с ботом и нажмите /start.")
             return
-        await state.clear()
-        await state.set_state(TelethonSetup.api_id)
+        url = telethon_web.create_login_url(message.from_user.id)
         await message.answer(
-            "🔐 <b>Подключение Telethon</b>\n\n"
-            "1/4. Введите <b>API ID</b> с my.telegram.org.\n"
-            "API HASH, код входа и 2FA обрабатываются только здесь, не в общей группе.\n\n"
-            "Отмена: /cancel"
+            "🔐 <b>Telethon</b>\n\nСекретные данные теперь вводятся в отдельном браузерном окне.",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[[InlineKeyboardButton(text="🪟 Открыть окно авторизации", url=url)]]
+            ),
         )
         return
 
+    await state.clear()
     player = await db.get_player(message.from_user.id)
-    if not player:
-        await state.set_state(RegisterPlayer.nickname)
-        if payload == "market":
-            await state.update_data(after_register="market")
-        await message.answer(
-            "Привет! Для работы с группой сначала зарегистрируем игровой ник.\n\n"
-            "👤 Введите ваш <b>ник в XZONA</b>:"
-        )
-        return
-
-    if payload == "market":
-        await message.answer("🛒 <b>Рынок ГП</b>", reply_markup=market_menu(is_admin(message.from_user.id, config)))
-        return
+    name = f"<b>{escape(player.game_nickname)}</b>" if player else "участник"
     await message.answer(
-        f"🎮 Привет, <b>{escape(player.game_nickname)}</b>!",
-        reply_markup=main_menu(is_admin(message.from_user.id, config)),
+        f"🎮 Привет, {name}.\n\n"
+        "Рабочие функции XZONA Bot выполняются <b>внутри тем игровой группы</b>.\n"
+        "• Ник и должность — в теме «Ники игроков»\n"
+        "• Снаряжение — в теме «Снаряжение группировки»\n"
+        "• Заказы — в теме «Рынок ГП»\n\n"
+        "Личный чат нужен только для получения защищённой ссылки на окно авторизации Telethon и для личных уведомлений."
     )
 
 
@@ -531,20 +531,25 @@ async def admin_telethon(callback: CallbackQuery, config: Config, telethon: Tele
 
 
 @router.callback_query(F.data == "telethon:setup")
-async def telethon_setup_start(callback: CallbackQuery, state: FSMContext, config: Config):
+async def telethon_setup_start(
+    callback: CallbackQuery,
+    state: FSMContext,
+    config: Config,
+    telethon_web: TelethonWebAuth,
+):
     if not can_manage_telethon(callback.from_user.id, config):
         await callback.answer("Недостаточно прав", show_alert=True)
         return
     if callback.message.chat.type != "private":
-        await callback.answer("Откройте личный чат с ботом для настройки Telethon.", show_alert=True)
+        await callback.answer("Получите окно авторизации через /admin в группе.", show_alert=True)
         return
     await state.clear()
-    await state.set_state(TelethonSetup.api_id)
+    url = telethon_web.create_login_url(callback.from_user.id)
     await callback.message.answer(
-        "🔐 <b>Подключение Telethon</b>\n\n"
-        "1/4. Введите <b>API ID</b> с my.telegram.org.\n"
-        "Секретные сообщения бот постарается удалить сразу после обработки.\n\n"
-        "Отмена: /cancel"
+        "🔐 <b>Подключение Telethon</b>\n\nВведите API ID/API HASH, телефон, код и 2FA в браузерном окне:",
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text="🪟 Открыть окно авторизации", url=url)]]
+        ),
     )
     await callback.answer()
 
@@ -707,39 +712,21 @@ async def telethon_sync_nicks(callback: CallbackQuery, db: Database, config: Con
 
 @router.message(F.text == "🛒 Рынок ГП")
 async def market_home(message: Message, db: Database, state: FSMContext, config: Config, bot: Bot):
-    if message.chat.type != "private":
-        me = await bot.get_me()
-        await message.answer("🛒 Заказ оформляется в личном чате с ботом.", reply_markup=market_topic_panel(me.username))
+    topic = await db.get_market_topic()
+    if message.chat.type == "private":
+        await state.clear()
+        await message.answer("🛒 Заказы теперь оформляются прямо в настроенной теме «Рынок ГП» игровой группы.")
         return
-    if not await ensure_registered(message, db, state, after_register="market"):
+    if topic and message.is_topic_message and (message.chat.id, message.message_thread_id) == topic:
+        await message.answer("🛒 <b>Рынок ГП</b>\n\nИспользуйте панель темы для создания заказа.")
         return
-    if not await has_permission(message.from_user.id, "market.create", db, config):
-        await message.answer("⛔ Рынок ГП доступен только участникам Полдня.")
-        return
-    await message.answer("🛒 <b>Рынок ГП</b>\n\nСформируйте заказ, и бот отправит его Торговцу ГП.", reply_markup=market_menu(is_admin(message.from_user.id, config)))
 
 
 @router.callback_query(F.data == "market:new")
 async def market_new(callback: CallbackQuery, db: Database, state: FSMContext, config: Config):
-    if callback.message.chat.type != "private":
-        await callback.answer("Оформление заказа доступно в личном чате.", show_alert=True)
-        return
-    if not await has_permission(callback.from_user.id, "market.create", db, config):
-        await callback.answer("Рынок ГП доступен только участникам Полдня.", show_alert=True)
-        return
-    player = await db.get_player(callback.from_user.id)
-    if not player:
-        await callback.answer("Сначала зарегистрируйте игровой ник через /start.", show_alert=True)
-        return
-    target = await db.get_market_merchant_target()
-    if not target:
-        await callback.answer("Торговец ГП ещё не настроен администратором.", show_alert=True)
-        return
     await state.clear()
-    await state.update_data(market_items=[], market_comment=None)
-    await state.set_state(MarketOrder.item_name)
-    await callback.message.answer("🎒 Введите название первой позиции заказа:")
-    await callback.answer()
+    await callback.answer("Оформляйте заказ в теме «Рынок ГП» игровой группы.", show_alert=True)
+    return
 
 
 @router.message(MarketOrder.item_name)
@@ -922,20 +909,11 @@ async def admin_market(callback: CallbackQuery, db: Database, config: Config, te
 
 @router.callback_query(F.data == "market_settings:merchant")
 async def market_merchant_start(callback: CallbackQuery, state: FSMContext, config: Config):
+    await state.clear()
     if not is_admin(callback.from_user.id, config):
         await callback.answer("Недостаточно прав", show_alert=True)
         return
-    if callback.message.chat.type != "private":
-        await callback.answer("Настройте Торговца в личном чате с ботом.", show_alert=True)
-        return
-    await state.set_state(MarketSettings.merchant_target)
-    await callback.message.answer(
-        "👤 Введите получателя заказов:\n\n"
-        "• <code>@username</code> Торговца ГП — для отправки через Telethon;\n"
-        "• либо числовой Telegram ID — бот попробует отправить напрямую.\n\n"
-        "Торговец может узнать ID командой /myid в личном чате с этим ботом."
-    )
-    await callback.answer()
+    await callback.answer("Торговец настраивается в группе: /admin → Рынок ГП или ответом /set_gp_merchant на его сообщение.", show_alert=True)
 
 
 @router.message(MarketSettings.merchant_target)
@@ -1360,4 +1338,4 @@ async def fallback(message: Message, db: Database, config: Config):
             await message.answer(outcome.notice)
         return
     if message.chat.type == "private":
-        await message.answer("Используйте кнопки меню 👇", reply_markup=main_menu(is_admin(message.from_user.id, config)))
+        await message.answer("Рабочее управление выполняется внутри тематических разделов игровой группы. Для справки используйте /help.")

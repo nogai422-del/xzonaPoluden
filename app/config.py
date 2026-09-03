@@ -15,6 +15,10 @@ class Config:
     admin_ids: set[int]
     owner_id: int | None
     db_path: Path
+    telethon_web_host: str
+    telethon_web_port: int
+    telethon_web_public_url: str
+    telethon_web_ticket_ttl: int
 
 
 def load_config() -> Config:
@@ -35,4 +39,22 @@ def load_config() -> Config:
         admin_ids.add(owner_id)
 
     db_path = Path(os.getenv("DB_PATH", "bot.db")).expanduser()
-    return Config(bot_token=token, admin_ids=admin_ids, owner_id=owner_id, db_path=db_path)
+
+    web_host = os.getenv("TELETHON_WEB_HOST", "127.0.0.1").strip() or "127.0.0.1"
+    raw_port = os.getenv("TELETHON_WEB_PORT", "8088").strip()
+    web_port = int(raw_port) if raw_port.isdigit() else 8088
+    default_public = f"http://127.0.0.1:{web_port}"
+    web_public_url = os.getenv("TELETHON_WEB_PUBLIC_URL", default_public).strip().rstrip("/") or default_public
+    raw_ttl = os.getenv("TELETHON_WEB_TICKET_TTL", "900").strip()
+    web_ticket_ttl = int(raw_ttl) if raw_ttl.isdigit() else 900
+
+    return Config(
+        bot_token=token,
+        admin_ids=admin_ids,
+        owner_id=owner_id,
+        db_path=db_path,
+        telethon_web_host=web_host,
+        telethon_web_port=web_port,
+        telethon_web_public_url=web_public_url,
+        telethon_web_ticket_ttl=web_ticket_ttl,
+    )
