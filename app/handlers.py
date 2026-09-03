@@ -35,7 +35,7 @@ from .keyboards import (
     telethon_menu,
 )
 from .nicks import extract_nickname
-from .roles import allowed_position_lines, has_position_permission, parse_profile, position_display
+from .roles import INTERNAL_POSITION_ORDER, POSITIONS, ROLE_CAPACITIES, allowed_position_lines, has_position_permission, parse_profile, position_display
 from .states import AddItem, EditItem, MarketOrder, MarketSettings, RegisterPlayer, TelethonSetup
 from .telethon_manager import TelethonManager
 from .telethon_web import TelethonWebAuth
@@ -160,6 +160,21 @@ class NickSyncOutcome:
     request_id: int | None = None
 
 
+async def available_position_lines_for_user(db: Database, user_id: int) -> list[str]:
+    lines: list[str] = []
+    for code in INTERNAL_POSITION_ORDER:
+        if not await db.position_slot_available(code, exclude_telegram_id=user_id):
+            continue
+        capacity = ROLE_CAPACITIES.get(code)
+        if capacity is None:
+            lines.append(POSITIONS[code].label)
+        else:
+            used = await db.position_count(code, exclude_telegram_id=user_id)
+            lines.append(f"{POSITIONS[code].label} (свободно {capacity - used}/{capacity})")
+    lines.extend(["Лидер <группировки>", "Заместитель <группировки>"] )
+    return lines
+
+
 async def sync_nick_message(message: Message, db: Database) -> NickSyncOutcome:
     topic = await db.get_nicks_topic()
     if not topic or not message.is_topic_message or message.message_thread_id is None:
@@ -175,14 +190,14 @@ async def sync_nick_message(message: Message, db: Database) -> NickSyncOutcome:
 
     profile = parse_profile(raw, allow_legacy=False)
     if not profile:
-        allowed = "\n".join(f"• {item}" for item in allowed_position_lines())
+        allowed = "\n".join(f"• {item}" for item in await available_position_lines_for_user(db, message.from_user.id))
         return NickSyncOutcome(
             True,
             "Напишите данные двумя строками:\n<code>ИгровойНик\nДолжность</code>\n\n"
             f"Доступные варианты должности:\n{allowed}",
         )
     if profile.position_code == "__invalid__":
-        allowed = "\n".join(f"• {item}" for item in allowed_position_lines())
+        allowed = "\n".join(f"• {item}" for item in await available_position_lines_for_user(db, message.from_user.id))
         return NickSyncOutcome(
             True,
             f"Неизвестная должность: <b>{escape(profile.position_label or '—')}</b>.\n\n"
@@ -211,6 +226,15 @@ async def sync_nick_message(message: Message, db: Database) -> NickSyncOutcome:
             notice=(
                 f"✅ Данные обновлены.\n👤 <b>{escape(profile.nickname)}</b>\n"
                 f"🎖 <b>{escape(position_display(profile.position_code, profile.faction_code))}</b> — уже подтверждено."
+            ),
+        )
+
+    if not await db.position_slot_available(profile.position_code, exclude_telegram_id=message.from_user.id):
+        return NickSyncOutcome(
+            True,
+            error=(
+                f"⛔ Должность <b>{escape(position_display(profile.position_code, profile.faction_code))}</b> сейчас полностью занята.\n"
+                "Посмотрите актуальный список свободных должностей в закреплённой инструкции этой темы."
             ),
         )
 

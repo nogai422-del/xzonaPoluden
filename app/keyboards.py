@@ -3,6 +3,8 @@ from __future__ import annotations
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
+from .roles import FACTIONS, POSITIONS
+
 
 def main_menu(admin: bool) -> ReplyKeyboardMarkup:
     rows = [
@@ -333,7 +335,9 @@ def group_telethon_menu(*, connected: bool, can_manage: bool, can_sync: bool, bo
 
 
 def group_nicks_admin_menu(*, connected: bool, can_manage: bool, topic_ready: bool, bot_username: str | None = None) -> InlineKeyboardMarkup:
-    rows: list[list[InlineKeyboardButton]] = []
+    rows: list[list[InlineKeyboardButton]] = [
+        [InlineKeyboardButton(text="🎖 Назначить должности", callback_data="gadmin:roles")]
+    ]
     if connected and topic_ready:
         rows.append([InlineKeyboardButton(text="🔄 Импортировать старые ники", callback_data="telethon:sync_nicks")])
     elif not connected and can_manage:
@@ -357,7 +361,7 @@ def group_role_requests_keyboard(requests) -> InlineKeyboardMarkup:
         if len(label) > 62:
             label = label[:59] + "…"
         rows.append([InlineKeyboardButton(text=label, callback_data=f"grole:view:{req.id}")])
-    rows.append([InlineKeyboardButton(text="↩️ Назад", callback_data="gadmin:home")])
+    rows.append([InlineKeyboardButton(text="↩️ К ролям", callback_data="gadmin:roles")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -368,6 +372,98 @@ def group_role_request_review_keyboard(request_id: int) -> InlineKeyboardMarkup:
                 InlineKeyboardButton(text="✅ Подтвердить", callback_data=f"grole:approve:{request_id}"),
                 InlineKeyboardButton(text="❌ Отклонить", callback_data=f"grole:reject:{request_id}"),
             ],
-            [InlineKeyboardButton(text="↩️ К списку", callback_data="gadmin:roles")],
+            [InlineKeyboardButton(text="↩️ К заявкам", callback_data="grole:requests")],
         ]
     )
+
+
+def group_role_admin_keyboard(*, unassigned_count: int, pending_count: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=f"👤 Без должности ({unassigned_count})", callback_data="grole:unassigned:0")],
+            [InlineKeyboardButton(text="👥 Все игроки", callback_data="grole:all:0")],
+            [InlineKeyboardButton(text=f"⏳ Заявки ({pending_count})", callback_data="grole:requests")],
+            [InlineKeyboardButton(text="🔎 Найти игрока", callback_data="grole:search")],
+            [InlineKeyboardButton(text="↩️ Назад", callback_data="gadmin:home")],
+        ]
+    )
+
+
+def group_role_players_keyboard(players, *, page: int, total: int, mode: str, page_size: int = 10) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    for p in players:
+        status = "✅" if getattr(p, "position_status", None) == "approved" and getattr(p, "position_code", None) else "⚠️"
+        label = f"{status} {p.game_nickname}"
+        if len(label) > 58:
+            label = label[:55] + "…"
+        rows.append([InlineKeyboardButton(text=label, callback_data=f"grole:player:{p.telegram_id}")])
+    nav: list[InlineKeyboardButton] = []
+    if page > 0:
+        nav.append(InlineKeyboardButton(text="⬅️", callback_data=f"grole:{mode}:{page-1}"))
+    if (page + 1) * page_size < total:
+        nav.append(InlineKeyboardButton(text="➡️", callback_data=f"grole:{mode}:{page+1}"))
+    if nav:
+        rows.append(nav)
+    rows.append([InlineKeyboardButton(text="↩️ К ролям", callback_data="gadmin:roles")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def group_role_player_keyboard(
+    player_id: int,
+    *,
+    available_internal_codes: list[str],
+    current_position_code: str | None,
+    has_role: bool,
+) -> InlineKeyboardMarkup:
+    icons = {
+        "leader": "👑",
+        "deputy_leader": "⭐",
+        "trader": "💰",
+        "diplomat": "🤝",
+        "storekeeper": "📦",
+        "sho_commander": "⚔️",
+        "private": "🪖",
+    }
+    rows: list[list[InlineKeyboardButton]] = []
+    for code in available_internal_codes:
+        if code == current_position_code:
+            continue
+        spec = POSITIONS[code]
+        rows.append([InlineKeyboardButton(text=f"{icons.get(code, '🎖')} {spec.label}", callback_data=f"grole:set:{player_id}:{code}")])
+    rows.append([InlineKeyboardButton(text="🌐 Внешняя группировка", callback_data=f"grole:ext:{player_id}")])
+    if has_role:
+        rows.append([InlineKeyboardButton(text="🗑 Снять должность", callback_data=f"grole:clear:{player_id}")])
+    rows.append([InlineKeyboardButton(text="↩️ К ролям", callback_data="gadmin:roles")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def group_external_factions_keyboard(player_id: int) -> InlineKeyboardMarkup:
+    rows = [
+        [InlineKeyboardButton(text=label, callback_data=f"grole:extf:{player_id}:{code}")]
+        for code, label in FACTIONS.items()
+    ]
+    rows.append([InlineKeyboardButton(text="↩️ К игроку", callback_data=f"grole:player:{player_id}")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def group_external_role_keyboard(player_id: int, faction_code: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="👑 Лидер", callback_data=f"grole:setext:{player_id}:external_leader:{faction_code}")],
+            [InlineKeyboardButton(text="⭐ Заместитель", callback_data=f"grole:setext:{player_id}:external_deputy:{faction_code}")],
+            [InlineKeyboardButton(text="↩️ К группировкам", callback_data=f"grole:ext:{player_id}")],
+        ]
+    )
+
+
+def group_role_search_results_keyboard(players) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    for p in players[:20]:
+        label = p.game_nickname
+        if p.username:
+            label += f" (@{p.username})"
+        if len(label) > 58:
+            label = label[:55] + "…"
+        rows.append([InlineKeyboardButton(text=label, callback_data=f"grole:player:{p.telegram_id}")])
+    rows.append([InlineKeyboardButton(text="↩️ К ролям", callback_data="gadmin:roles")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)

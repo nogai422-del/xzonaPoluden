@@ -89,6 +89,22 @@ POSITIONS: dict[str, PositionSpec] = {
     ),
 }
 
+
+ROLE_CAPACITIES: dict[str, int] = {
+    "leader": 1,
+    "deputy_leader": 5,
+}
+
+INTERNAL_POSITION_ORDER: tuple[str, ...] = (
+    "leader",
+    "deputy_leader",
+    "trader",
+    "diplomat",
+    "storekeeper",
+    "sho_commander",
+    "private",
+)
+
 FACTIONS: dict[str, str] = {
     "mercenaries": "Наёмники",
     "duty": "Долг",

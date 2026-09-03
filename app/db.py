@@ -6,6 +6,8 @@ from pathlib import Path
 
 import aiosqlite
 
+from .roles import ROLE_CAPACITIES
+
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -55,6 +57,13 @@ class RoleRequest:
     requested_at: str
     reviewed_by: int | None
     reviewed_at: str | None
+
+
+class RoleCapacityFullError(RuntimeError):
+    def __init__(self, position_code: str, capacity: int):
+        super().__init__(f"Role capacity reached: {position_code} ({capacity})")
+        self.position_code = position_code
+        self.capacity = capacity
 
 
 @dataclass(slots=True)
@@ -375,6 +384,80 @@ class Database:
             cur = await db.execute("SELECT COUNT(*) FROM players")
             return int((await cur.fetchone())[0])
 
+    async def count_players_without_role(self) -> int:
+        async with aiosqlite.connect(self.path) as db:
+            cur = await db.execute(
+                """
+                SELECT COUNT(*) FROM players
+                WHERE position_code IS NULL OR position_status != 'approved'
+                """
+            )
+            return int((await cur.fetchone())[0])
+
+    async def list_players_without_role(self, limit: int = 20, offset: int = 0) -> list[Player]:
+        async with aiosqlite.connect(self.path) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(
+                """
+                SELECT * FROM players
+                WHERE position_code IS NULL OR position_status != 'approved'
+                ORDER BY game_nickname COLLATE NOCASE
+                LIMIT ? OFFSET ?
+                """,
+                (limit, offset),
+            )
+            return [Player(**dict(r)) for r in await cur.fetchall()]
+
+    async def search_players(self, query: str, limit: int = 20) -> list[Player]:
+        value = f"%{query.strip()}%"
+        async with aiosqlite.connect(self.path) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(
+                """
+                SELECT * FROM players
+                WHERE game_nickname LIKE ? COLLATE NOCASE
+                   OR COALESCE(username, '') LIKE ? COLLATE NOCASE
+                   OR full_name LIKE ? COLLATE NOCASE
+                   OR CAST(telegram_id AS TEXT) LIKE ?
+                ORDER BY game_nickname COLLATE NOCASE
+                LIMIT ?
+                """,
+                (value, value, value, value, limit),
+            )
+            return [Player(**dict(r)) for r in await cur.fetchall()]
+
+    async def position_count(self, position_code: str, *, exclude_telegram_id: int | None = None) -> int:
+        async with aiosqlite.connect(self.path) as db:
+            if exclude_telegram_id is None:
+                cur = await db.execute(
+                    "SELECT COUNT(*) FROM players WHERE position_code=? AND position_status='approved'",
+                    (position_code,),
+                )
+            else:
+                cur = await db.execute(
+                    "SELECT COUNT(*) FROM players WHERE position_code=? AND position_status='approved' AND telegram_id != ?",
+                    (position_code, exclude_telegram_id),
+                )
+            return int((await cur.fetchone())[0])
+
+    async def position_counts(self) -> dict[str, int]:
+        async with aiosqlite.connect(self.path) as db:
+            cur = await db.execute(
+                """
+                SELECT position_code, COUNT(*) AS c
+                FROM players
+                WHERE position_status='approved' AND position_code IS NOT NULL
+                GROUP BY position_code
+                """
+            )
+            return {str(code): int(count) for code, count in await cur.fetchall()}
+
+    async def position_slot_available(self, position_code: str, *, exclude_telegram_id: int | None = None) -> bool:
+        capacity = ROLE_CAPACITIES.get(position_code)
+        if capacity is None:
+            return True
+        return await self.position_count(position_code, exclude_telegram_id=exclude_telegram_id) < capacity
+
     async def set_setting(self, key: str, value: str) -> None:
         now = utc_now()
         async with aiosqlite.connect(self.path) as db:
@@ -524,6 +607,20 @@ class Database:
     ) -> bool:
         now = utc_now()
         async with aiosqlite.connect(self.path) as db:
+            await db.execute("BEGIN IMMEDIATE")
+            capacity = ROLE_CAPACITIES.get(position_code)
+            if capacity is not None:
+                cur = await db.execute(
+                    """
+                    SELECT COUNT(*) FROM players
+                    WHERE position_code=? AND position_status='approved' AND telegram_id != ?
+                    """,
+                    (position_code, telegram_id),
+                )
+                used = int((await cur.fetchone())[0])
+                if used >= capacity:
+                    await db.rollback()
+                    raise RoleCapacityFullError(position_code, capacity)
             cur = await db.execute(
                 """
                 UPDATE players
@@ -557,6 +654,15 @@ class Database:
                 """,
                 (approved_by, now, now, telegram_id),
             )
+            if cur.rowcount > 0:
+                await db.execute(
+                    """
+                    UPDATE role_requests
+                    SET status='superseded', reviewed_by=?, reviewed_at=?
+                    WHERE telegram_id=? AND status='pending'
+                    """,
+                    (approved_by, now, telegram_id),
+                )
             await db.commit()
             return cur.rowcount > 0
 
@@ -663,6 +769,21 @@ class Database:
             return None
         now = utc_now()
         async with aiosqlite.connect(self.path) as db:
+            await db.execute("BEGIN IMMEDIATE")
+            if approve:
+                capacity = ROLE_CAPACITIES.get(request.requested_position_code)
+                if capacity is not None:
+                    cur = await db.execute(
+                        """
+                        SELECT COUNT(*) FROM players
+                        WHERE position_code=? AND position_status='approved' AND telegram_id != ?
+                        """,
+                        (request.requested_position_code, request.telegram_id),
+                    )
+                    used = int((await cur.fetchone())[0])
+                    if used >= capacity:
+                        await db.rollback()
+                        raise RoleCapacityFullError(request.requested_position_code, capacity)
             await db.execute(
                 "UPDATE role_requests SET status=?, reviewed_by=?, reviewed_at=? WHERE id=? AND status='pending'",
                 ('approved' if approve else 'rejected', reviewer_id, now, request_id),

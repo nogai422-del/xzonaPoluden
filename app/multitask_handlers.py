@@ -15,12 +15,12 @@ from .config import Config
 from .db import Database
 from .group_handlers import GROUP_TYPES, WORKFLOW_LABELS, flow_edit_from_message, has_permission, market_order_group_text, refresh_order_cards, safe_delete
 from .housekeeping import cleanup_all_tracked_messages, delete_incoming_later, schedule_delete, temp_answer, temp_callback_message
-from .roles import is_external_position
+from .roles import INTERNAL_POSITION_ORDER, POSITIONS, ROLE_CAPACITIES, is_external_position
 from .states import GroupDiplomacy, GroupEventCreate, GroupGpStock, GroupInfoCreate, GroupTargetCreate
 from .telethon_manager import TelethonManager
 
 router = Router(name="multitask_v7")
-ANNOUNCE_VERSION = "v7.2"
+ANNOUNCE_VERSION = "v7.3"
 
 TOPICS: dict[str, dict[str, str]] = {
     "general": {"label": "General", "emoji": "💬"},
@@ -189,14 +189,45 @@ async def announce_topic(bot: Bot, db: Database, code: str, *, force: bool = Fal
     msg_key = f"announce_message:{code}:{chat_id}:{thread_id}"
     already_current = bool(await db.get_setting(key))
     text, markup = topic_intro(code)
+    if code == "nicks":
+        counts = await db.position_counts()
+        role_lines: list[str] = []
+        icons = {
+            "leader": "👑",
+            "deputy_leader": "⭐",
+            "trader": "💰",
+            "diplomat": "🤝",
+            "storekeeper": "📦",
+            "sho_commander": "⚔️",
+            "private": "🪖",
+        }
+        for position_code in INTERNAL_POSITION_ORDER:
+            used = counts.get(position_code, 0)
+            capacity = ROLE_CAPACITIES.get(position_code)
+            if capacity is not None and used >= capacity:
+                # Filled limited positions disappear from the public availability list.
+                continue
+            label = POSITIONS[position_code].label
+            if capacity is None:
+                suffix = "без ограничений"
+            else:
+                suffix = f"свободно {capacity - used}/{capacity}"
+            role_lines.append(f"{icons.get(position_code, '🎖')} <b>{label}</b> — {suffix}")
+        role_lines.append("🌐 Лидер/Заместитель внешней группировки — по согласованию")
+        text += (
+            "\n\n<b>Доступные должности сейчас:</b>\n"
+            + "\n".join(role_lines)
+            + "\n\nОграничения: Лидер — 1 место, Заместитель лидера — 5 мест. "
+              "Когда места заканчиваются, должность исчезает из этого списка."
+        )
 
     existing_raw = await db.get_setting(msg_key)
     existing_id = int(existing_raw) if existing_raw and str(existing_raw).isdigit() else None
     if existing_id:
-        # On the same announcement version there is deliberately no new message.
-        # /announce_all therefore behaves as a refresh, not as a spam generator.
-        if already_current:
-            return True if force else False
+        # Normal restarts do not touch an already-current panel. Force means a real
+        # in-place refresh (used after role changes so availability stays current).
+        if already_current and not force:
+            return False
         try:
             await bot.edit_message_text(
                 chat_id=chat_id,

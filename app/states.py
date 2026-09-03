@@ -81,3 +81,7 @@ class GroupTargetCreate(StatesGroup):
 class GroupInfoCreate(StatesGroup):
     title = State()
     body = State()
+
+
+class GroupRoleAdmin(StatesGroup):
+    search = State()
