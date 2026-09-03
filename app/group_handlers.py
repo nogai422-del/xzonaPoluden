@@ -163,6 +163,33 @@ async def refresh_nicks_announcement(bot: Bot, db: Database) -> None:
         pass
 
 
+async def group_admin_text(db: Database, telethon: TelethonManager) -> str:
+    """Render the unified admin dashboard for both private chat and the group.
+
+    Keep this function dependency-light: the /admin command must remain usable even
+    when some optional modules/topics are not configured yet.
+    """
+    total = await db.count_players()
+    unassigned = await db.count_players_without_role()
+    pending = await db.count_pending_role_requests()
+    stored_count, stored_players = await db.storage_stats()
+    topics = await db.list_topics()
+    connected = await telethon.is_connected()
+    merchant = await db.get_market_merchant_target()
+
+    return (
+        "<b>⚙️ УПРАВЛЕНИЕ ГРУППИРОВКОЙ</b>\n\n"
+        f"👥 Игроков: <b>{total}</b>\n"
+        f"⚠️ Без должности: <b>{unassigned}</b>\n"
+        f"⏳ Заявок на должность: <b>{pending}</b>\n"
+        f"🎒 На хранении: <b>{stored_count}</b> поз. / <b>{stored_players}</b> игроков\n"
+        f"🧩 Разделов привязано: <b>{len(topics)}/12</b>\n"
+        f"🪙 Торговец ГП: <b>{escape(merchant) if merchant else 'не назначен'}</b>\n"
+        f"🔐 Telethon: <b>{'🟢 подключён' if connected else '🔴 не подключён'}</b>\n\n"
+        "Выберите раздел управления ниже."
+    )
+
+
 async def role_admin_summary(db: Database) -> tuple[str, int, int]:
     total = await db.count_players()
     unassigned = await db.count_players_without_role()
@@ -613,15 +640,23 @@ async def clear_role_command(message: Message, db: Database, config: Config, bot
     await delete_incoming_later(message)
 
 
+@router.message(Command("settings"), F.chat.type == "private")
 @router.message(Command("admin"), F.chat.type.in_(ADMIN_CHAT_TYPES))
 async def group_admin(message: Message, db: Database, config: Config, telethon: TelethonManager):
     if not message.from_user or not await can_manage_roles(message.from_user.id, db, config):
-        await temp_answer(message, "Недостаточно прав.", ttl=45)
+        if message.chat.type == "private":
+            await message.answer("Недостаточно прав. Проверьте OWNER_ID/ADMIN_IDS и команду /myid.")
+        else:
+            await temp_answer(message, "Недостаточно прав.", ttl=45)
         return
     if message.chat.type in GROUP_TYPES:
         await db.set_setting("primary_chat_id", str(message.chat.id))
-    await temp_answer(message, await group_admin_text(db, telethon), reply_markup=group_admin_menu(), ttl=900)
-    await delete_incoming_later(message)
+        await temp_answer(message, await group_admin_text(db, telethon), reply_markup=group_admin_menu(), ttl=900)
+        await delete_incoming_later(message)
+    else:
+        # In private chat the settings panel is intentionally persistent: it is the
+        # owner's control console and should not disappear after the cleanup TTL.
+        await message.answer(await group_admin_text(db, telethon), reply_markup=group_admin_menu())
 
 
 @router.callback_query(F.data == "gadmin:home", F.message.chat.type.in_(ADMIN_CHAT_TYPES))
