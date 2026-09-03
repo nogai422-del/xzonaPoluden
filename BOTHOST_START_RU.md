@@ -1,4 +1,4 @@
-# XZONA Group Bot v7.4.1 — точный запуск на Bothost.ru
+# XZONA Group Bot v7.4.2 — точный запуск на Bothost.ru
 
 Эта сборка специально сделана так, чтобы при проблеме не было «тишины»: первая строка runtime-лога начинается с `[XZONA BOOT]`, а при фатальной ошибке процесс оставляет диагностический `/health` с безопасным текстом ошибки.
 
@@ -51,7 +51,7 @@ TELETHON_WEB_TICKET_TTL=900
 Сразу после запуска:
 
 ```text
-[XZONA BOOT] Starting XZONA Group Bot v7.4.1 Bothost-safe
+[XZONA BOOT] Starting XZONA Group Bot v7.4.2 Bothost-safe
 [XZONA BOOT] env: BOT_TOKEN=yes, OWNER_ID=yes, PORT=8080, DB_PATH=/app/data/bot.db
 ... SQLite ready
 ... Web/Telethon auth listening on 0.0.0.0:8080

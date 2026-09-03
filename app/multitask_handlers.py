@@ -20,7 +20,8 @@ from .states import GroupDiplomacy, GroupEventCreate, GroupGpStock, GroupInfoCre
 from .telethon_manager import TelethonManager
 
 router = Router(name="multitask_v7")
-ANNOUNCE_VERSION = "v7.4"
+ADMIN_CHAT_TYPES = set(GROUP_TYPES) | {"private"}
+ANNOUNCE_VERSION = "v7.4.2"
 
 TOPICS: dict[str, dict[str, str]] = {
     "general": {"label": "General", "emoji": "💬"},
