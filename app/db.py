@@ -1360,7 +1360,7 @@ class Database:
         if cur.rowcount: await self.audit(actor_id,"event.status",f"#{event_id} {status}")
         return cur.rowcount>0
 
-    async def diplomacy_set(self, faction: str, relation: str, note: str | None, actor_id: int) -> None:
+    async def diplomacy_set(self, faction: str, relation: str, note: str | None, actor_id: int) -> int:
         if relation not in {"ally", "neutral", "war"}:
             raise ValueError("bad relation")
         faction_name = faction.strip()
@@ -1378,7 +1378,30 @@ class Database:
                 (faction_name, relation, clean_note, actor_id, now),
             )
             await db.commit()
+        async with aiosqlite.connect(self.path) as db:
+            cur = await db.execute("SELECT id FROM diplomacy_records WHERE faction_name=? COLLATE NOCASE", (faction_name,))
+            row = await cur.fetchone()
         await self.audit(actor_id, "diplomacy.set", f"{faction_name}={relation}")
+        return int(row[0]) if row else 0
+
+    async def diplomacy_get(self, record_id: int) -> dict | None:
+        async with aiosqlite.connect(self.path) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute("SELECT * FROM diplomacy_records WHERE id=?", (int(record_id),))
+            row = await cur.fetchone()
+            return dict(row) if row else None
+
+    async def diplomacy_delete(self, record_id: int, actor_id: int) -> bool:
+        row = await self.diplomacy_get(record_id)
+        if not row:
+            return False
+        async with aiosqlite.connect(self.path) as db:
+            cur = await db.execute("DELETE FROM diplomacy_records WHERE id=?", (int(record_id),))
+            await db.commit()
+        if cur.rowcount:
+            await self.audit(actor_id, "diplomacy.delete", f"#{record_id} {row['faction_name']}")
+            return True
+        return False
 
     async def diplomacy_list(self) -> list[dict]:
         async with aiosqlite.connect(self.path) as db:
