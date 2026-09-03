@@ -43,6 +43,16 @@ class SyncResult:
     invalid: int = 0
 
 
+@dataclass(slots=True)
+class MemberSyncResult:
+    chat_id: int
+    scanned: int = 0
+    active: int = 0
+    added: int = 0
+    updated: int = 0
+    left: int = 0
+
+
 class TelethonManager:
     def __init__(self, config: Config, db: Database):
         self.config = config
@@ -51,6 +61,7 @@ class TelethonManager:
         self.client: TelegramClient | None = None
         self.pending: PendingLogin | None = None
         self._lock = asyncio.Lock()
+        self._member_sync_lock = asyncio.Lock()
         self.last_error: str | None = None
         self.phone: str | None = None
 
@@ -265,6 +276,67 @@ class TelethonManager:
 
         await self.db.set_nicks_history_imported(utc_now(), result.imported)
         return result
+
+    async def sync_group_members(self, chat_id: int | None = None) -> MemberSyncResult:
+        if self._member_sync_lock.locked():
+            raise RuntimeError("Синхронизация участников уже выполняется.")
+        async with self._member_sync_lock:
+            return await self._sync_group_members_unlocked(chat_id)
+
+    async def _sync_group_members_unlocked(self, chat_id: int | None = None) -> MemberSyncResult:
+        """Synchronize current members of the manually selected main group.
+
+        This does not create fake XZONA players for users who have no nickname.
+        It stores Telegram membership separately and refreshes identity data of
+        already registered players by Telegram ID.
+        """
+        if not await self.is_connected() or not self.client:
+            raise RuntimeError("Telethon не подключён.")
+        if chat_id is None:
+            chat_id = await self.db.get_primary_chat_id()
+        if chat_id is None:
+            raise RuntimeError(
+                "Сначала вручную привяжите хотя бы один раздел группы, например /set_general_topic."
+            )
+        await self.client.get_dialogs(limit=None)
+        entity = await self.client.get_entity(chat_id)
+        members: list[dict] = []
+        scanned = 0
+        try:
+            async for user in self.client.iter_participants(entity):
+                scanned += 1
+                if getattr(user, "bot", False):
+                    continue
+                uid = int(getattr(user, "id", 0) or 0)
+                if uid <= 0:
+                    continue
+                first_name = str(getattr(user, "first_name", "") or "").strip()
+                last_name = str(getattr(user, "last_name", "") or "").strip()
+                full_name = " ".join(x for x in (first_name, last_name) if x).strip()
+                if not full_name:
+                    full_name = "Удалённый аккаунт" if getattr(user, "deleted", False) else str(uid)
+                members.append({
+                    "telegram_id": uid,
+                    "username": getattr(user, "username", None),
+                    "full_name": full_name,
+                    "is_deleted": bool(getattr(user, "deleted", False)),
+                })
+        except FloodWaitError as exc:
+            raise RuntimeError(f"Telegram просит подождать {exc.seconds} сек. перед синхронизацией участников.") from exc
+        except Exception as exc:
+            raise RuntimeError(f"Не удалось получить участников через Telethon: {type(exc).__name__}: {exc}") from exc
+        if not members:
+            raise RuntimeError("Telethon не вернул ни одного участника. Снимок не применён, чтобы не пометить всех вышедшими.")
+        stats = await self.db.sync_group_members(int(chat_id), members)
+        self.last_error = None
+        return MemberSyncResult(
+            chat_id=int(chat_id),
+            scanned=scanned,
+            active=int(stats["active"]),
+            added=int(stats["added"]),
+            updated=int(stats["updated"]),
+            left=int(stats["left"]),
+        )
 
     async def send_message(self, target: str, text: str) -> None:
         if not await self.is_connected() or not self.client:

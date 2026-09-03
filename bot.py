@@ -19,6 +19,31 @@ from app.telethon_manager import TelethonManager
 from app.telethon_web import TelethonWebAuth
 
 
+async def member_sync_loop(telethon: TelethonManager, db: Database, config) -> None:
+    interval = int(getattr(config, "telethon_member_sync_interval", 0) or 0)
+    if interval <= 0:
+        return
+    log = logging.getLogger("xzona.members")
+    await asyncio.sleep(20)
+    while True:
+        delay = min(interval, 60)
+        try:
+            chat_id = await db.get_primary_chat_id()
+            if chat_id is not None and await telethon.is_connected():
+                result = await telethon.sync_group_members(chat_id)
+                log.info(
+                    "Telethon member sync: chat=%s active=%s added=%s updated=%s left=%s",
+                    result.chat_id, result.active, result.added, result.updated, result.left,
+                )
+                delay = interval
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            log.warning("Telethon member sync failed: %s: %s", type(exc).__name__, exc)
+            delay = min(max(60, interval // 4), 300)
+        await asyncio.sleep(max(30, delay))
+
+
 async def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     log = logging.getLogger("xzona.boot")
@@ -87,11 +112,13 @@ async def main() -> None:
 
     announce_task = asyncio.create_task(startup_announcements(bot, db, config, telethon))
     housekeeping_task = asyncio.create_task(housekeeping_loop(bot, 30))
+    member_sync_task = asyncio.create_task(member_sync_loop(telethon, db, config))
     try:
         await dp.start_polling(bot)
     finally:
         announce_task.cancel()
         housekeeping_task.cancel()
+        member_sync_task.cancel()
         await telethon_web.stop()
         await telethon.shutdown()
         await bot.session.close()

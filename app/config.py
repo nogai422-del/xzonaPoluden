@@ -21,6 +21,7 @@ class Config:
     telethon_web_ticket_ttl: int
     announce_on_start: bool
     temp_message_ttl: int
+    telethon_member_sync_interval: int
 
 
 def _public_url(port: int) -> str:
@@ -80,6 +81,10 @@ def load_config() -> Config:
     temp_message_ttl = int(raw_temp_ttl) if raw_temp_ttl.isdigit() else 180
     temp_message_ttl = max(30, min(temp_message_ttl, 3600))
 
+    raw_member_sync = os.getenv("TELETHON_MEMBER_SYNC_INTERVAL", "3600").strip()
+    telethon_member_sync_interval = int(raw_member_sync) if raw_member_sync.isdigit() else 3600
+    telethon_member_sync_interval = max(0, telethon_member_sync_interval)
+
     return Config(
         bot_token=token,
         admin_ids=admin_ids,
@@ -91,4 +96,5 @@ def load_config() -> Config:
         telethon_web_ticket_ttl=web_ticket_ttl,
         announce_on_start=announce_on_start,
         temp_message_ttl=temp_message_ttl,
+        telethon_member_sync_interval=telethon_member_sync_interval,
     )

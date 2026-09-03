@@ -1,66 +1,70 @@
-# XZONA Group Bot v7.4.2 — точный запуск на Bothost.ru
+# XZONA Group Bot v7.6 — запуск на Bothost.ru
 
-Эта сборка специально сделана так, чтобы при проблеме не было «тишины»: первая строка runtime-лога начинается с `[XZONA BOOT]`, а при фатальной ошибке процесс оставляет диагностический `/health` с безопасным текстом ошибки.
+## 1. Проект
 
-## 1. Настройки проекта Bothost
+- платформа: Telegram / Python;
+- главный файл: `main.py`;
+- при использовании приложенного Dockerfile включите собственный Dockerfile;
+- домен включён;
+- внутренний порт: `8080` (или порт, который Bothost передаёт в `PORT`).
 
-В панели проекта выставьте:
-
-- платформа: **Telegram / Python**;
-- главный файл: **`main.py`**;
-- **Использовать собственный Dockerfile: ВКЛ**;
-- домен: **ВКЛ**;
-- внутренний порт: **`8080`**.
-
-Важно: документация Bothost требует, чтобы веб-сервис слушал `0.0.0.0`, порт брал из `PORT`, а внутренний порт в панели совпадал с реально слушаемым портом. Эта сборка делает именно так; значение по умолчанию — 8080.
-
-После изменения Dockerfile/порта нужен именно **Deploy/Redeploy**, не простой Restart.
+После обновления файлов выполняйте **Redeploy**.
 
 ## 2. Переменные окружения
 
-Минимум:
-
 ```env
-OWNER_ID=ВАШ_ЧИСЛОВОЙ_TELEGRAM_ID
-ADMIN_IDS=ВАШ_ЧИСЛОВОЙ_TELEGRAM_ID
+OWNER_ID=ВАШ_TELEGRAM_ID
+ADMIN_IDS=ВАШ_TELEGRAM_ID
 DB_PATH=/app/data/bot.db
 TELETHON_WEB_HOST=0.0.0.0
 ANNOUNCE_ON_START=1
 TEMP_MESSAGE_TTL=90
+TELETHON_MEMBER_SYNC_INTERVAL=3600
 ```
 
-Токен обычно передаётся Bothost как `BOT_TOKEN`. Сборка также понимает `TELEGRAM_BOT_TOKEN`, `TOKEN` и `API_TOKEN`.
+Токен должен быть задан штатным полем Bothost или как `BOT_TOKEN`.
 
-Если в панели есть отдельное поле Bot Token — заполните его. Если `/health` показывает, что токен не найден, добавьте вручную:
-
-```env
-BOT_TOKEN=1234567890:AA...
-```
-
-Для Telethon после появления домена:
+После выдачи HTTPS-домена:
 
 ```env
 TELETHON_WEB_PUBLIC_URL=https://ВАШ-ДОМЕН
 TELETHON_WEB_TICKET_TTL=900
 ```
 
-Не задавайте `TELETHON_WEB_PORT`, если Bothost уже задаёт `PORT`.
+`TELETHON_MEMBER_SYNC_INTERVAL=3600` означает синхронизацию состава раз в час. `0` отключает фоновую синхронизацию, ручная кнопка продолжает работать.
 
-## 3. Что должно появиться в логах
+## 3. Первый запуск v7.6
 
-Сразу после запуска:
+1. Сохраните старый `/app/data/bot.db` — удалять его не нужно.
+2. Сделайте Redeploy.
+3. В личке бота откройте `/admin`.
+4. В `🔐 Telethon` авторизуйте аккаунт.
+5. **Заново вручную подтвердите нужные разделы**: зайдите в каждую forum-тему и выполните соответствующую команду `/set_..._topic`.
+6. Вернитесь в `/admin -> 🔐 Telethon` и нажмите `👥 Синхронизировать участников`.
+7. Через `📋 Состав группы` проверьте, кого Telethon видит в группе и у кого ещё нет игрового ника.
+
+Важно: v7.6 специально не использует старые автоматические привязки разделов, пока вы не назначите их вручную.
+
+## 4. Команды ручной привязки
 
 ```text
-[XZONA BOOT] Starting XZONA Group Bot v7.4.2 Bothost-safe
-[XZONA BOOT] env: BOT_TOKEN=yes, OWNER_ID=yes, PORT=8080, DB_PATH=/app/data/bot.db
-... SQLite ready
-... Web/Telethon auth listening on 0.0.0.0:8080
-... Telegram connected: @имя_бота (id=...)
+/set_general_topic
+/set_nicks_topic
+/set_storage_topic
+/set_market_topic
+/set_delivery_topic
+/set_gp_stock_topic
+/set_events_topic
+/set_diplomacy_topic
+/set_targets_topic
+/set_news_topic
+/set_info_topic
+/set_bar_topic
 ```
 
-Если последней строки `Telegram connected` нет — смотрите строку перед ней: теперь там будет точная причина.
+Если ошиблись разделом, выполните ту же команду в правильной теме. Старая панель бота будет удалена из прежнего раздела.
 
-## 4. Проверка через браузер
+## 5. Проверка запуска
 
 Откройте:
 
@@ -68,38 +72,10 @@ TELETHON_WEB_TICKET_TTL=900
 https://ВАШ-ДОМЕН/health
 ```
 
-Нормальный ответ:
+В логах должна быть строка:
 
-```json
-{"ok": true, "ready": true, "telethon_connected": false}
+```text
+[XZONA BOOT] Starting XZONA Group Bot v7.6 Bothost-safe
 ```
 
-Если основной процесс упал уже после сборки, диагностический launcher постарается оставить `/health` доступным и вернёт примерно:
-
-```json
-{"ok": false, "ready": false, "startup_error_type": "...", "startup_error": "..."}
-```
-
-Секреты в этот endpoint не выводятся.
-
-## 5. База данных
-
-Bothost предназначает `/app/data` для постоянных данных. Оставьте:
-
-```env
-DB_PATH=/app/data/bot.db
-```
-
-Старый `bot.db` от v7.3/v7.4 удалять не нужно. Если он уже есть, поместите/оставьте его в `data`.
-
-## 6. После первого успешного запуска
-
-1. В Telegram отправьте боту `/myid` и проверьте, что ID совпадает с `OWNER_ID`.
-2. Откройте `/admin`.
-3. Авторизуйте Telethon через `🔐 Telethon`.
-4. Выполните `/autoconfigure_topics`.
-5. Если нужно повторно показать инструкции во всех темах — `/announce_all`.
-
-## 7. Если всё равно не запускается
-
-Нужны именно **runtime-логи после Build completed**, а не только лог сборки. Скопируйте первые строки от `[XZONA BOOT]` до traceback/ошибки — по ним можно точно определить проблему.
+После подключения Telegram должна появиться строка `Telegram connected: @...`.

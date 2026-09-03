@@ -3,7 +3,6 @@ from __future__ import annotations
 from datetime import datetime
 from html import escape
 import asyncio
-import re
 
 from aiogram import Bot, F, Router
 from aiogram.filters import Command
@@ -21,7 +20,7 @@ from .telethon_manager import TelethonManager
 
 router = Router(name="multitask_v7")
 ADMIN_CHAT_TYPES = set(GROUP_TYPES) | {"private"}
-ANNOUNCE_VERSION = "v7.5"
+ANNOUNCE_VERSION = "v7.6"
 
 TOPICS: dict[str, dict[str, str]] = {
     "general": {"label": "General", "emoji": "💬"},
@@ -36,21 +35,6 @@ TOPICS: dict[str, dict[str, str]] = {
     "news": {"label": "Инфа в Зоне (Новости)", "emoji": "📈"},
     "info": {"label": "Прочая информация", "emoji": "🗺"},
     "bar": {"label": "Бар «Гильза»", "emoji": "🍻"},
-}
-
-TOPIC_ALIASES: dict[str, tuple[str, ...]] = {
-    "general": ("general", "общая", "общая беседа"),
-    "nicks": ("ники игроков", "ники"),
-    "storage": ("снаряжение группировки", "хранилище", "склад группировки"),
-    "market": ("рынок гп",),
-    "delivery": ("пункт выдачи заказов", "выдача заказов"),
-    "gp_stock": ("снаряжение гп", "склад гп"),
-    "events": ("мероприятия", "ивенты"),
-    "diplomacy": ("союзы и война", "дипломатия"),
-    "targets": ("список целей", "цели"),
-    "news": ("инфа в зоне (новости)", "инфа в зоне(новости)", "инфа в зоне", "новости"),
-    "info": ("прочая информация", "информация"),
-    "bar": ("бар «гильза»", 'бар "гильза"', "бар гильза"),
 }
 
 REL = {"ally": "🟢 Союз", "neutral": "⚪ Нейтралитет", "war": "🔴 Война"}
@@ -71,7 +55,6 @@ async def bot_joined_group(event: ChatMemberUpdated, db: Database, bot: Bot):
     active = {ChatMemberStatus.MEMBER, ChatMemberStatus.ADMINISTRATOR}
     if new_status not in active or old_status in active:
         return
-    await db.set_setting("primary_chat_id", str(event.chat.id))
     key = f"joined_announce:{event.chat.id}:{ANNOUNCE_VERSION}"
     if await db.get_setting(key):
         return
@@ -80,8 +63,8 @@ async def bot_joined_group(event: ChatMemberUpdated, db: Database, bot: Bot):
             event.chat.id,
             "<b>🤖 XZONA Group Bot подключён</b>\n\n"
             "Я начинаю обслуживать разделы этой игровой группы. После первоначальной настройки в каждой рабочей теме появится собственная инструкция и кнопки.\n\n"
-            "Руководству: откройте <code>/admin</code> и подключите Telethon. После авторизации я сам найду стандартные темы, привяжу их и опубликую инструкции. "
-            "Команда <code>/autoconfigure_topics</code> нужна только как ручной повторный поиск, если название какой-либо темы отличается.\n\n"
+            "Руководству: откройте <code>/admin</code>, подключите Telethon и вручную назначьте каждый раздел командой <code>/set_..._topic</code> прямо внутри нужной темы. "
+            "Автоматического определения разделов больше нет — бот использует только те привязки, которые назначило руководство.\n\n"
             "После настройки уже присутствующим игрокам ничего переустанавливать не нужно — они увидят инструкции прямо в темах."
         )
         await db.set_setting(key, datetime.utcnow().isoformat())
@@ -263,47 +246,15 @@ async def announce_configured_topics(bot: Bot, db: Database, *, force: bool = Fa
     return sent
 
 
-def _norm_topic_title(value: str) -> str:
-    return re.sub(r"\s+", " ", value.casefold().replace("ё", "е")).strip()
-
-
-async def auto_bind_topics(chat_id: int, db: Database, telethon: TelethonManager) -> list[str]:
-    found = await telethon.list_forum_topics(chat_id)
-    matched: list[str] = []
-    for title, thread_id in found:
-        norm = _norm_topic_title(title)
-        for code, aliases in TOPIC_ALIASES.items():
-            if any(_norm_topic_title(alias) == norm for alias in aliases):
-                await db.set_topic(code, chat_id, thread_id)
-                # Keep compatibility with the v4-v6 helpers used by the stable modules.
-                if code == "general":
-                    await db.set_general_topic(chat_id, thread_id)
-                elif code == "nicks":
-                    await db.set_nicks_topic(chat_id, thread_id)
-                elif code == "storage":
-                    await db.set_storage_topic(chat_id, thread_id)
-                elif code == "market":
-                    await db.set_market_topic(chat_id, thread_id)
-                matched.append(f"{code}:{thread_id}")
-                break
-    if matched:
-        await db.set_setting("primary_chat_id", str(chat_id))
-    return matched
-
-
 async def startup_announcements(bot: Bot, db: Database, config: Config, telethon: TelethonManager | None = None) -> None:
-    """Announce v7 to already-present users without creating restart spam.
+    """Refresh only manually configured topic panels on startup.
 
-    The coroutine stays asleep in the background until it knows the main group and
-    Telethon is authorized. That lets a fresh Bothost deployment announce itself
-    immediately on join and then auto-discover every forum topic as soon as the
-    owner finishes the browser login — even if that happens much later.
+    Forum topics are never discovered or rebound automatically in v7.6.
     """
     if not config.announce_on_start:
         return
     await asyncio.sleep(3)
     await announce_configured_topics(bot, db, force=False)
-    # Surface role requests that may already exist from v7.3 or a previous import.
     try:
         from .handlers import publish_role_request_card
         for req in await db.list_pending_role_requests(limit=200):
@@ -311,36 +262,39 @@ async def startup_announcements(bot: Bot, db: Database, config: Config, telethon
     except Exception:
         pass
 
-    while True:
-        primary_raw = await db.get_setting("primary_chat_id")
-        if not primary_raw:
-            topics = await db.list_topics()
-            if topics:
-                primary_raw = str(next(iter(topics.values()))[0])
-                await db.set_setting("primary_chat_id", primary_raw)
 
-        if primary_raw and str(primary_raw).lstrip("-").isdigit() and telethon is not None:
-            chat_id = int(primary_raw)
-            if await telethon.is_connected():
-                attempt_key = f"autoconfigure:{ANNOUNCE_VERSION}:{chat_id}"
-                if not await db.get_setting(attempt_key):
-                    try:
-                        matched = await auto_bind_topics(chat_id, db, telethon)
-                        await db.set_setting(attempt_key, datetime.utcnow().isoformat() + f"|{len(matched)}")
-                    except Exception:
-                        # Keep trying: an authorization can be valid while Telegram is
-                        # temporarily unavailable or the group entity is not resolved yet.
-                        await asyncio.sleep(30)
-                        continue
-                await announce_configured_topics(bot, db, force=False)
-                return
-        await asyncio.sleep(15)
+async def remove_old_topic_panel(bot: Bot, db: Database, code: str, new_chat_id: int, new_thread_id: int) -> None:
+    """Remove the persistent panel from a previous binding when a module is moved."""
+    old_chat = await db.get_setting(f"topic:{code}:chat")
+    old_thread = await db.get_setting(f"topic:{code}:thread")
+    if old_chat is None or old_thread is None:
+        legacy_prefix = {"general": "general", "nicks": "nicks", "storage": "storage", "market": "market"}.get(code)
+        if legacy_prefix:
+            old_chat = await db.get_setting(f"{legacy_prefix}_chat_id")
+            old_thread = await db.get_setting(f"{legacy_prefix}_thread_id")
+    if not old_chat or old_thread is None:
+        return
+    try:
+        previous = (int(old_chat), int(old_thread))
+    except ValueError:
+        return
+    if previous == (int(new_chat_id), int(new_thread_id)):
+        return
+    msg_key = f"announce_message:{code}:{previous[0]}:{previous[1]}"
+    raw_message_id = await db.get_setting(msg_key)
+    if raw_message_id and str(raw_message_id).isdigit():
+        try:
+            await bot.delete_message(previous[0], int(raw_message_id))
+        except Exception:
+            pass
+    await db.delete_settings([msg_key])
 
 
 async def _set_topic(message: Message, db: Database, config: Config, code: str, permission: str="roles.manage") -> None:
     if not message.from_user or not await has_permission(message.from_user.id, permission, db, config):
         await temp_answer(message, "Недостаточно прав.", ttl=45)
         return
+    await remove_old_topic_panel(message.bot, db, code, message.chat.id, _thread(message))
     await db.set_topic(code, message.chat.id, _thread(message))
     await db.set_setting("primary_chat_id", str(message.chat.id))
     await db.audit(message.from_user.id, "topic.set", f"{code}={message.chat.id}/{_thread(message)}")
@@ -388,25 +342,17 @@ async def announce_all_cmd(message: Message, db: Database, config: Config, bot: 
 
 
 @router.message(Command("autoconfigure_topics"), F.chat.type.in_(GROUP_TYPES))
-async def autoconfigure_topics(message: Message, db: Database, config: Config, telethon: TelethonManager, bot: Bot):
-    if not message.from_user or not await has_permission(message.from_user.id, "roles.manage", db, config): return
-    if not await telethon.is_connected():
-        await temp_answer(message, "Сначала подключите Telethon через /admin → 🔐 Telethon.", ttl=90)
-        await delete_incoming_later(message)
+async def autoconfigure_topics_disabled(message: Message, db: Database, config: Config):
+    if not message.from_user or not await has_permission(message.from_user.id, "roles.manage", db, config):
         return
-    try:
-        raw_matched = await auto_bind_topics(message.chat.id, db, telethon)
-    except Exception as exc:
-        await temp_answer(message, f"Не удалось прочитать список тем: <code>{escape(str(exc)[:500])}</code>", ttl=120)
-        await delete_incoming_later(message)
-        return
-    matched = []
-    for value in raw_matched:
-        code, thread_id = value.split(":", 1)
-        matched.append(f"• {TOPICS[code]['label']} → {thread_id}")
-    await db.set_setting(f"autoconfigure:{ANNOUNCE_VERSION}:{message.chat.id}", datetime.utcnow().isoformat() + f"|{len(raw_matched)}")
-    n = await announce_configured_topics(bot, db, force=False)
-    await temp_answer(message, "<b>Автонастройка тем завершена</b>\n\n" + ("\n".join(matched) if matched else "Совпадений по известным названиям не найдено.") + f"\n\nИнструкций создано/обновлено: {n}.", ttl=120)
+    await temp_answer(
+        message,
+        "ℹ️ <b>Автоопределение разделов отключено.</b>\n\n"
+        "Чтобы не было путаницы, бот использует только ручную привязку. "
+        "Откройте нужную тему и отправьте соответствующую команду <code>/set_..._topic</code>.\n\n"
+        "Текущие привязки: <code>/admin → 🧩 Разделы и запуск</code>.",
+        ttl=120,
+    )
     await delete_incoming_later(message)
 
 
@@ -987,16 +933,24 @@ async def system_admin(cb: CallbackQuery, db: Database, config: Config, telethon
         lines.append(f"{'✅' if code in topics else '⚠️'} {meta['emoji']} {meta['label']}")
     lines += [
         "",
-        "Быстрый путь:",
-        "1. Подключите Telethon — после авторизации автонастройка тем запустится сама.",
-        "2. Проверьте разделы и при необходимости привяжите отличающиеся названия вручную.",
-        "3. <code>/autoconfigure_topics</code> можно запустить вручную для повторного поиска.",
-        "4. <code>/announce_all</code> обновляет инструкции без создания дублей.",
+        "<b>Разделы назначаются только вручную.</b>",
+        "Зайдите внутрь нужной forum-темы и отправьте:",
         "",
-        "Ручные команды новых разделов:",
-        "<code>/set_delivery_topic</code>, <code>/set_gp_stock_topic</code>, <code>/set_events_topic</code>,",
-        "<code>/set_diplomacy_topic</code>, <code>/set_targets_topic</code>, <code>/set_news_topic</code>,",
-        "<code>/set_info_topic</code>, <code>/set_bar_topic</code>.",
+        "<code>/set_general_topic</code> — General",
+        "<code>/set_nicks_topic</code> — Ники игроков",
+        "<code>/set_storage_topic</code> — Снаряжение группировки",
+        "<code>/set_market_topic</code> — Рынок ГП",
+        "<code>/set_delivery_topic</code> — Пункт выдачи заказов",
+        "<code>/set_gp_stock_topic</code> — Снаряжение ГП",
+        "<code>/set_events_topic</code> — Мероприятия",
+        "<code>/set_diplomacy_topic</code> — Союзы и Война",
+        "<code>/set_targets_topic</code> — Список целей",
+        "<code>/set_news_topic</code> — Новости",
+        "<code>/set_info_topic</code> — Прочая информация",
+        "<code>/set_bar_topic</code> — Бар «Гильза»",
+        "",
+        "Если ошиблись, просто выполните ту же команду в правильной теме — привязка перенесётся.",
+        "<code>/announce_all</code> обновляет инструкции только в уже назначенных разделах.",
     ]
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📣 Повторить инструкции", callback_data="v7admin:announce")],

@@ -458,6 +458,8 @@ async def set_general_topic_group(message: Message, db: Database, config: Config
         await temp_answer(message, "Недостаточно прав.", ttl=45)
         return
     thread_id = int(message.message_thread_id or 0)
+    from .multitask_handlers import remove_old_topic_panel
+    await remove_old_topic_panel(message.bot, db, "general", message.chat.id, thread_id)
     await db.set_general_topic(message.chat.id, thread_id)
     await db.set_topic("general", message.chat.id, thread_id)
     await db.set_setting("primary_chat_id", str(message.chat.id))
@@ -476,6 +478,8 @@ async def set_storage_topic_group(message: Message, db: Database, config: Config
     if not topic:
         await temp_answer(message, "Отправьте /set_storage_topic прямо внутри темы «Снаряжение группировки».", ttl=90)
         return
+    from .multitask_handlers import remove_old_topic_panel
+    await remove_old_topic_panel(message.bot, db, "storage", topic[0], topic[1])
     await db.set_storage_topic(*topic)
     await db.set_topic("storage", *topic)
     await db.set_setting("primary_chat_id", str(message.chat.id))
@@ -507,6 +511,8 @@ async def set_market_topic_group(message: Message, db: Database, config: Config)
     if not topic:
         await temp_answer(message, "Отправьте /set_market_topic прямо внутри темы «Рынок ГП».", ttl=90)
         return
+    from .multitask_handlers import remove_old_topic_panel
+    await remove_old_topic_panel(message.bot, db, "market", topic[0], topic[1])
     await db.set_market_topic(*topic)
     await db.set_topic("market", *topic)
     await db.set_setting("primary_chat_id", str(message.chat.id))
@@ -538,6 +544,8 @@ async def set_nicks_topic_group(message: Message, db: Database, config: Config, 
     if not topic:
         await temp_answer(message, "Отправьте /set_nicks_topic прямо внутри темы «Ники игроков».", ttl=90)
         return
+    from .multitask_handlers import remove_old_topic_panel
+    await remove_old_topic_panel(message.bot, db, "nicks", topic[0], topic[1])
     await db.set_nicks_topic(*topic)
     await db.set_topic("nicks", *topic)
     await db.set_setting("primary_chat_id", str(message.chat.id))
@@ -997,30 +1005,111 @@ async def group_role_request_review(callback: CallbackQuery, db: Database, confi
     await callback.answer("Готово")
 
 
+async def _telethon_admin_view(db: Database, config: Config, bot: Bot, telethon: TelethonManager, user_id: int):
+    connected = await telethon.is_connected()
+    nicks_topic = await db.get_nicks_topic()
+    primary_chat_id = await db.get_primary_chat_id()
+    me = await bot.get_me()
+    lines = [
+        "<b>🔐 Telethon</b>",
+        "",
+        f"Статус: {'🟢 подключён' if connected else '🔴 не подключён'}",
+        f"Аккаунт: <code>{escape(telethon.masked_phone())}</code>",
+        "",
+    ]
+    if primary_chat_id is not None:
+        stats = await db.group_members_stats(primary_chat_id)
+        lines += [
+            f"👥 Основная группа: <code>{primary_chat_id}</code>",
+            f"Участников сейчас: <b>{stats['active']}</b>",
+            f"Из них зарегистрировали ник: <b>{stats['registered']}</b>",
+            f"Последняя синхронизация: <code>{escape(str(stats['last_sync'] or 'ещё не выполнялась'))}</code>",
+        ]
+    else:
+        lines += [
+            "👥 Основная группа: <b>не выбрана</b>",
+            "Сначала вручную привяжите любой раздел этой группы, например <code>/set_general_topic</code>.",
+        ]
+    interval = int(getattr(config, "telethon_member_sync_interval", 0) or 0)
+    lines += [
+        "",
+        "Telethon используется для синхронизации состава группы и импорта старых ников.",
+        (f"Автосинхронизация участников: каждые <b>{max(1, interval // 60)}</b> мин." if interval > 0 else "Автосинхронизация участников: <b>выключена</b>."),
+        "",
+        "Разделы бот больше не определяет автоматически — их назначает руководство вручную.",
+        "API HASH, код входа и 2FA вводятся только в отдельном браузерном окне.",
+    ]
+    markup = group_telethon_menu(
+        connected=connected,
+        bot_username=me.username,
+        can_manage=can_manage_telethon(user_id, config),
+        can_sync=nicks_topic is not None,
+        can_sync_members=primary_chat_id is not None,
+    )
+    return "\n".join(lines), markup
+
+
 @router.callback_query(F.data == "gadmin:telethon", F.message.chat.type.in_(ADMIN_CHAT_TYPES))
 async def group_admin_telethon(callback: CallbackQuery, db: Database, config: Config, bot: Bot, telethon: TelethonManager):
     if not await can_manage_roles(callback.from_user.id, db, config):
         await callback.answer("Недостаточно прав", show_alert=True)
         return
-    connected = await telethon.is_connected()
-    topic = await db.get_nicks_topic()
-    me = await bot.get_me()
-    text = (
-        "<b>🔐 Telethon</b>\n\n"
-        f"Статус: {'🟢 подключён' if connected else '🔴 не подключён'}\n"
-        f"Аккаунт: <code>{escape(telethon.masked_phone())}</code>\n\n"
-        "Через Telethon бот один раз дочитывает старые ники и при необходимости отправляет заказы Торговцу.\n\n"
-        "API HASH, код входа и 2FA вводятся в отдельном браузерном окне. Одноразовую ссылку может создать только владелец."
+    text, markup = await _telethon_admin_view(db, config, bot, telethon, callback.from_user.id)
+    await callback.message.edit_text(text, reply_markup=markup)
+    await callback.answer()
+
+
+@router.callback_query(F.data == "gtelethon:sync_members", F.message.chat.type.in_(ADMIN_CHAT_TYPES))
+async def group_telethon_sync_members(callback: CallbackQuery, db: Database, config: Config, bot: Bot, telethon: TelethonManager):
+    if not await can_manage_roles(callback.from_user.id, db, config):
+        return await callback.answer("Недостаточно прав", show_alert=True)
+    if not await telethon.is_connected():
+        return await callback.answer("Сначала подключите Telethon.", show_alert=True)
+    chat_id = await db.get_primary_chat_id()
+    if chat_id is None:
+        return await callback.answer("Сначала вручную привяжите хотя бы один раздел группы.", show_alert=True)
+    await callback.answer("Синхронизирую участников…")
+    try:
+        result = await telethon.sync_group_members(chat_id)
+    except Exception as exc:
+        text, markup = await _telethon_admin_view(db, config, bot, telethon, callback.from_user.id)
+        text += f"\n\n⚠️ Ошибка синхронизации: <code>{escape(str(exc)[:500])}</code>"
+        await callback.message.edit_text(text, reply_markup=markup)
+        return
+    await db.audit(
+        callback.from_user.id,
+        "telethon.members_sync",
+        f"chat={result.chat_id} active={result.active} added={result.added} updated={result.updated} left={result.left}",
     )
-    await callback.message.edit_text(
-        text,
-        reply_markup=group_telethon_menu(
-            connected=connected,
-            bot_username=me.username,
-            can_manage=can_manage_telethon(callback.from_user.id, config),
-            can_sync=topic is not None,
-        ),
+    text, markup = await _telethon_admin_view(db, config, bot, telethon, callback.from_user.id)
+    text += (
+        "\n\n✅ <b>Синхронизация завершена</b>\n"
+        f"Сейчас в группе: <b>{result.active}</b>\n"
+        f"Новых: <b>{result.added}</b> · обновлено: <b>{result.updated}</b> · вышли: <b>{result.left}</b>"
     )
+    await callback.message.edit_text(text, reply_markup=markup)
+
+
+@router.callback_query(F.data == "gtelethon:members", F.message.chat.type.in_(ADMIN_CHAT_TYPES))
+async def group_telethon_members(callback: CallbackQuery, db: Database, config: Config):
+    if not await can_manage_roles(callback.from_user.id, db, config):
+        return await callback.answer("Недостаточно прав", show_alert=True)
+    chat_id = await db.get_primary_chat_id()
+    if chat_id is None:
+        return await callback.answer("Сначала вручную привяжите хотя бы один раздел группы.", show_alert=True)
+    rows = await db.list_group_members(chat_id, status="active", limit=60)
+    if not rows:
+        return await callback.answer("Состав ещё не синхронизирован.", show_alert=True)
+    lines = ["<b>👥 Состав группы по Telethon</b>", ""]
+    for row in rows:
+        username = f"@{escape(row['username'])}" if row.get("username") else f"<code>{row['telegram_id']}</code>"
+        if row.get("game_nickname"):
+            lines.append(f"✅ <b>{escape(row['game_nickname'])}</b> — {username}")
+        else:
+            lines.append(f"⚠️ {escape(row.get('full_name') or str(row['telegram_id']))} — {username} — ник не зарегистрирован")
+    if len(rows) >= 60:
+        lines.append("\n<i>Показаны первые 60 участников.</i>")
+    await temp_callback_message(callback, "\n".join(lines), ttl=max(120, config.temp_message_ttl))
     await callback.answer()
 
 
@@ -1048,7 +1137,7 @@ async def group_telethon_web_auth(
             "🔐 <b>Одноразовое окно авторизации Telethon</b>\n\n"
             "Ссылка действует ограниченное время. В окне последовательно вводятся API ID, API HASH, телефон, "
             "код Telegram и, если включён, пароль 2FA.\n\n"
-            "После успешного входа вернитесь в группу и нажмите «Импортировать старые ники».",
+            "После успешного входа вернитесь в админ-панель. Там можно синхронизировать участников и отдельно импортировать старые ники.",
             reply_markup=markup,
         )
     except (TelegramForbiddenError, TelegramBadRequest):
@@ -1061,22 +1150,14 @@ async def group_telethon_web_auth(
 
 
 @router.callback_query(F.data == "gtelethon:disconnect", F.message.chat.type.in_(ADMIN_CHAT_TYPES))
-async def group_telethon_disconnect(callback: CallbackQuery, config: Config, bot: Bot, telethon: TelethonManager):
+async def group_telethon_disconnect(callback: CallbackQuery, db: Database, config: Config, bot: Bot, telethon: TelethonManager):
     if not can_manage_telethon(callback.from_user.id, config):
         await callback.answer("Только владелец может отключить Telethon.", show_alert=True)
         return
     await telethon.disconnect(clear_saved=True)
-    me = await bot.get_me()
-    await callback.message.edit_text(
-        "🔴 Telethon отключён, сохранённая сессия удалена.",
-        reply_markup=group_telethon_menu(
-            connected=False,
-            bot_username=me.username,
-            can_manage=True,
-            can_sync=False,
-        ),
-    )
-    await callback.answer()
+    text, markup = await _telethon_admin_view(db, config, bot, telethon, callback.from_user.id)
+    await callback.message.edit_text(text, reply_markup=markup)
+    await callback.answer("Telethon отключён")
 
 
 # ---------------------------------------------------------------------------

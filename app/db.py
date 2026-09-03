@@ -168,6 +168,21 @@ class Database:
                 );
                 CREATE INDEX IF NOT EXISTS idx_ephemeral_delete_after ON ephemeral_messages(delete_after);
 
+                CREATE TABLE IF NOT EXISTS group_members (
+                    chat_id INTEGER NOT NULL,
+                    telegram_id INTEGER NOT NULL,
+                    username TEXT,
+                    full_name TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','left')),
+                    is_deleted INTEGER NOT NULL DEFAULT 0,
+                    first_seen_at TEXT NOT NULL,
+                    last_seen_at TEXT NOT NULL,
+                    left_at TEXT,
+                    PRIMARY KEY(chat_id, telegram_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_group_members_status ON group_members(chat_id, status);
+                CREATE INDEX IF NOT EXISTS idx_group_members_name ON group_members(chat_id, full_name COLLATE NOCASE);
+
                 CREATE TABLE IF NOT EXISTS role_requests (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     telegram_id INTEGER NOT NULL,
@@ -443,6 +458,112 @@ class Database:
             )
             return [Player(**dict(r)) for r in await cur.fetchall()]
 
+    async def get_primary_chat_id(self) -> int | None:
+        raw = await self.get_setting("managed_chat_id")
+        if raw and raw.lstrip("-").isdigit():
+            return int(raw)
+        return None
+
+    async def sync_group_members(self, chat_id: int, members: list[dict]) -> dict[str, int]:
+        """Store one complete Telethon snapshot without inventing XZONA nicknames."""
+        now = utc_now()
+        clean: dict[int, dict] = {}
+        for item in members:
+            uid = int(item.get("telegram_id") or 0)
+            if uid <= 0:
+                continue
+            clean[uid] = {
+                "username": item.get("username") or None,
+                "full_name": str(item.get("full_name") or uid).strip() or str(uid),
+                "is_deleted": 1 if item.get("is_deleted") else 0,
+            }
+        async with aiosqlite.connect(self.path) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(
+                "SELECT telegram_id,username,full_name,status,is_deleted FROM group_members WHERE chat_id=?",
+                (chat_id,),
+            )
+            existing = {int(r["telegram_id"]): dict(r) for r in await cur.fetchall()}
+            added = 0
+            updated = 0
+            for uid, item in clean.items():
+                old = existing.get(uid)
+                if old is None:
+                    added += 1
+                elif (
+                    old.get("username") != item["username"]
+                    or old.get("full_name") != item["full_name"]
+                    or old.get("status") != "active"
+                    or int(old.get("is_deleted") or 0) != item["is_deleted"]
+                ):
+                    updated += 1
+                await db.execute(
+                    """
+                    INSERT INTO group_members(
+                        chat_id,telegram_id,username,full_name,status,is_deleted,
+                        first_seen_at,last_seen_at,left_at
+                    ) VALUES(?,?,?,?, 'active', ?, ?, ?, NULL)
+                    ON CONFLICT(chat_id,telegram_id) DO UPDATE SET
+                        username=excluded.username,
+                        full_name=excluded.full_name,
+                        status='active',
+                        is_deleted=excluded.is_deleted,
+                        last_seen_at=excluded.last_seen_at,
+                        left_at=NULL
+                    """,
+                    (chat_id, uid, item["username"], item["full_name"], item["is_deleted"], now, now),
+                )
+                await db.execute(
+                    "UPDATE players SET username=?, full_name=?, updated_at=? WHERE telegram_id=?",
+                    (item["username"], item["full_name"], now, uid),
+                )
+            active_before = {uid for uid, row in existing.items() if row.get("status") == "active"}
+            missing = sorted(active_before - set(clean))
+            if missing:
+                placeholders = ",".join("?" for _ in missing)
+                await db.execute(
+                    f"UPDATE group_members SET status='left', left_at=?, last_seen_at=? WHERE chat_id=? AND telegram_id IN ({placeholders})",
+                    (now, now, chat_id, *missing),
+                )
+            await db.commit()
+        await self.set_setting(f"members_sync:{chat_id}:at", now)
+        await self.set_setting(f"members_sync:{chat_id}:active", str(len(clean)))
+        return {"active": len(clean), "added": added, "updated": updated, "left": len(missing)}
+
+    async def group_members_stats(self, chat_id: int) -> dict[str, int | str | None]:
+        async with aiosqlite.connect(self.path) as db:
+            cur = await db.execute(
+                "SELECT COUNT(*), SUM(CASE WHEN status='active' THEN 1 ELSE 0 END) FROM group_members WHERE chat_id=?",
+                (chat_id,),
+            )
+            total, active = await cur.fetchone()
+            cur = await db.execute(
+                """SELECT COUNT(*) FROM group_members gm
+                   JOIN players p ON p.telegram_id=gm.telegram_id
+                   WHERE gm.chat_id=? AND gm.status='active'""",
+                (chat_id,),
+            )
+            registered = int((await cur.fetchone())[0])
+        return {
+            "total": int(total or 0),
+            "active": int(active or 0),
+            "registered": registered,
+            "last_sync": await self.get_setting(f"members_sync:{chat_id}:at"),
+        }
+
+    async def list_group_members(self, chat_id: int, *, status: str = "active", limit: int = 100, offset: int = 0) -> list[dict]:
+        async with aiosqlite.connect(self.path) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(
+                """SELECT gm.*, p.game_nickname, p.position_code, p.position_status
+                   FROM group_members gm LEFT JOIN players p ON p.telegram_id=gm.telegram_id
+                   WHERE gm.chat_id=? AND gm.status=?
+                   ORDER BY COALESCE(p.game_nickname, gm.full_name) COLLATE NOCASE
+                   LIMIT ? OFFSET ?""",
+                (chat_id, status, int(limit), int(offset)),
+            )
+            return [dict(r) for r in await cur.fetchall()]
+
     async def position_count(self, position_code: str, *, exclude_telegram_id: int | None = None) -> int:
         async with aiosqlite.connect(self.path) as db:
             if exclude_telegram_id is None:
@@ -507,8 +628,13 @@ class Database:
     async def set_nicks_topic(self, chat_id: int, thread_id: int) -> None:
         await self.set_setting("nicks_chat_id", str(chat_id))
         await self.set_setting("nicks_thread_id", str(thread_id))
+        await self.set_setting("primary_chat_id", str(chat_id))
+        await self.set_setting("managed_chat_id", str(chat_id))
+        await self.set_setting("topic:nicks:manual", "1")
 
     async def get_nicks_topic(self) -> tuple[int, int] | None:
+        if await self.get_setting("topic:nicks:manual") != "1":
+            return None
         chat_id = await self.get_setting("nicks_chat_id")
         thread_id = await self.get_setting("nicks_thread_id")
         if not chat_id or not thread_id:
@@ -521,8 +647,13 @@ class Database:
     async def set_general_topic(self, chat_id: int, thread_id: int) -> None:
         await self.set_setting("general_chat_id", str(chat_id))
         await self.set_setting("general_thread_id", str(thread_id))
+        await self.set_setting("primary_chat_id", str(chat_id))
+        await self.set_setting("managed_chat_id", str(chat_id))
+        await self.set_setting("topic:general:manual", "1")
 
     async def get_general_topic(self) -> tuple[int, int] | None:
+        if await self.get_setting("topic:general:manual") != "1":
+            return None
         chat_id = await self.get_setting("general_chat_id")
         thread_id = await self.get_setting("general_thread_id")
         if not chat_id or thread_id is None:
@@ -535,8 +666,13 @@ class Database:
     async def set_storage_topic(self, chat_id: int, thread_id: int) -> None:
         await self.set_setting("storage_chat_id", str(chat_id))
         await self.set_setting("storage_thread_id", str(thread_id))
+        await self.set_setting("primary_chat_id", str(chat_id))
+        await self.set_setting("managed_chat_id", str(chat_id))
+        await self.set_setting("topic:storage:manual", "1")
 
     async def get_storage_topic(self) -> tuple[int, int] | None:
+        if await self.get_setting("topic:storage:manual") != "1":
+            return None
         chat_id = await self.get_setting("storage_chat_id")
         thread_id = await self.get_setting("storage_thread_id")
         if not chat_id or not thread_id:
@@ -557,8 +693,13 @@ class Database:
     async def set_market_topic(self, chat_id: int, thread_id: int) -> None:
         await self.set_setting("market_chat_id", str(chat_id))
         await self.set_setting("market_thread_id", str(thread_id))
+        await self.set_setting("primary_chat_id", str(chat_id))
+        await self.set_setting("managed_chat_id", str(chat_id))
+        await self.set_setting("topic:market:manual", "1")
 
     async def get_market_topic(self) -> tuple[int, int] | None:
+        if await self.get_setting("topic:market:manual") != "1":
+            return None
         chat_id = await self.get_setting("market_chat_id")
         thread_id = await self.get_setting("market_thread_id")
         if not chat_id or not thread_id:
@@ -1132,8 +1273,13 @@ class Database:
     async def set_topic(self, code: str, chat_id: int, thread_id: int) -> None:
         await self.set_setting(f"topic:{code}:chat", str(chat_id))
         await self.set_setting(f"topic:{code}:thread", str(int(thread_id or 0)))
+        await self.set_setting("primary_chat_id", str(chat_id))
+        await self.set_setting("managed_chat_id", str(chat_id))
+        await self.set_setting(f"topic:{code}:manual", "1")
 
     async def get_topic(self, code: str) -> tuple[int, int] | None:
+        if await self.get_setting(f"topic:{code}:manual") != "1":
+            return None
         chat = await self.get_setting(f"topic:{code}:chat")
         thread = await self.get_setting(f"topic:{code}:thread")
         if chat is None or thread is None:

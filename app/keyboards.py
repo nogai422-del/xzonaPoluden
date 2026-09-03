@@ -321,9 +321,12 @@ def group_admin_back() -> InlineKeyboardMarkup:
     )
 
 
-def group_telethon_menu(*, connected: bool, can_manage: bool, can_sync: bool, bot_username: str | None = None) -> InlineKeyboardMarkup:
+def group_telethon_menu(*, connected: bool, can_manage: bool, can_sync: bool, can_sync_members: bool = False, bot_username: str | None = None) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
     if connected:
+        if can_sync_members:
+            rows.append([InlineKeyboardButton(text="👥 Синхронизировать участников", callback_data="gtelethon:sync_members")])
+            rows.append([InlineKeyboardButton(text="📋 Состав группы", callback_data="gtelethon:members")])
         if can_sync:
             rows.append([InlineKeyboardButton(text="🔄 Импортировать старые ники", callback_data="telethon:sync_nicks")])
         if can_manage:
