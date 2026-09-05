@@ -188,6 +188,11 @@ def market_topic_panel(bot_username: str) -> InlineKeyboardMarkup:
 # ---------------------------------------------------------------------------
 
 def group_storage_panel() -> InlineKeyboardMarkup:
+    from .community_views import storage_panel
+    return storage_panel()
+
+
+def legacy_group_storage_panel() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="➕ Принять предмет", callback_data="gstorage:add")],
@@ -261,6 +266,11 @@ def group_storage_confirm_keyboard() -> InlineKeyboardMarkup:
 
 
 def group_market_panel() -> InlineKeyboardMarkup:
+    from .community_views import market_panel
+    return market_panel()
+
+
+def legacy_group_market_panel() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="🛒 Новый заказ", callback_data="gmarket:new")],

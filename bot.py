@@ -7,10 +7,13 @@ from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.fsm.strategy import FSMStrategy
+from aiogram.fsm.storage.memory import SimpleEventIsolation
 
 from app.access_control import ExternalMemberTopicMiddleware, TopicMirrorMiddleware
 from app.config import load_config
 from app.db import Database
+from app.community_handlers import router as community_router
+from app.community_publish import community_publish_loop
 from app.group_handlers import router as group_router
 from app.handlers import router as legacy_router
 from app.multitask_handlers import router as multitask_router, startup_announcements
@@ -71,13 +74,14 @@ async def main() -> None:
     await telethon_web.start()
     log.info("Web/Telethon auth listening on %s:%s; public=%s", config.telethon_web_host, config.telethon_web_port, config.telethon_web_public_url)
 
-    dp = Dispatcher(fsm_strategy=FSMStrategy.USER_IN_TOPIC)
+    dp = Dispatcher(fsm_strategy=FSMStrategy.USER_IN_TOPIC, events_isolation=SimpleEventIsolation())
     # Moderation must run before mirroring so a forbidden external message is never copied.
     dp.message.outer_middleware(ExternalMemberTopicMiddleware())
     dp.message.outer_middleware(TopicMirrorMiddleware())
     dp.edited_message.outer_middleware(ExternalMemberTopicMiddleware())
 
     # Existing stable modules first, then v7 modules, then legacy private handlers.
+    dp.include_router(community_router)
     dp.include_router(group_router)
     dp.include_router(multitask_router)
     dp.include_router(legacy_router)
@@ -113,12 +117,15 @@ async def main() -> None:
     announce_task = asyncio.create_task(startup_announcements(bot, db, config, telethon))
     housekeeping_task = asyncio.create_task(housekeeping_loop(bot, 30))
     member_sync_task = asyncio.create_task(member_sync_loop(telethon, db, config))
+    community_task = asyncio.create_task(community_publish_loop(bot, db))
     try:
         await dp.start_polling(bot)
     finally:
         announce_task.cancel()
         housekeeping_task.cancel()
         member_sync_task.cancel()
+        community_task.cancel()
+        await asyncio.gather(announce_task, housekeeping_task, member_sync_task, community_task, return_exceptions=True)
         await telethon_web.stop()
         await telethon.shutdown()
         await bot.session.close()

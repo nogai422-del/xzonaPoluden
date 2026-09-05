@@ -4,3 +4,4 @@ python-dotenv==1.1.1
 telethon==1.40.0
 cryptography==45.0.6
 aiohttp==3.12.15
+Pillow==11.3.0

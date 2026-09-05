@@ -20,7 +20,7 @@ from .telethon_manager import TelethonManager
 
 router = Router(name="multitask_v7")
 ADMIN_CHAT_TYPES = set(GROUP_TYPES) | {"private"}
-ANNOUNCE_VERSION = "v7.6"
+ANNOUNCE_VERSION = "v8.0"
 
 TOPICS: dict[str, dict[str, str]] = {
     "general": {"label": "General", "emoji": "💬"},
@@ -90,6 +90,23 @@ async def _internal_user(user_id: int, db: Database, config: Config) -> bool:
 
 
 def topic_intro(code: str) -> tuple[str, InlineKeyboardMarkup | None]:
+    from .community_views import storage_panel, market_panel, diplomacy_panel
+    if code in ('storage', 'gp_stock'):
+        return ('<b>📦 Снаряжение группировки — склад</b>\n\n'
+                'Игрок выбирает предмет и подаёт заявку. Лидер / Заместитель одобряет её, '
+                'после чего Кладовщик (Старшина) выдаёт имущество. При одобрении создаётся резерв.\n\n'
+                'Кладовщик ведёт остатки и общий каталог: добавляет, переименовывает, удаляет и восстанавливает позиции. '
+                'Отмена ввода: /cancel.', storage_panel())
+    if code == 'market':
+        return ('<b>🪧 Рынок ГП — доска объявлений</b>\n\n'
+                'Создайте объявление: предмет из общего каталога → одна фотография → цена в игровых рублях → описание. '
+                'Перед публикацией бот покажет предпросмотр. После сделки нажмите «Продано». Отмена ввода: /cancel.', market_panel())
+    if code == 'diplomacy':
+        return ('<b>📊 Дипломатия</b>\n\n'
+                'Таблица показывает отношения Полдня и других группировок между собой: союз, нейтралитет, война или нет данных. '
+                'Отношения меняют Дипломат / руководство.\n\n'
+                'Враги Полдня автоматически попадают в цели. Враги союзников — исключительно по решению '
+                'подтверждённого Законодателя (Дипломата). При изменении основания решение нужно принять заново.', diplomacy_panel())
     base = {
         "general": (
             "<b>🤖 XZONA Group Bot запущен</b>\n\n"
@@ -173,6 +190,12 @@ async def announce_topic(bot: Bot, db: Database, code: str, *, force: bool = Fal
     msg_key = f"announce_message:{code}:{chat_id}:{thread_id}"
     already_current = bool(await db.get_setting(key))
     text, markup = topic_intro(code)
+    if code == 'storage' and await db.get_warehouse_topic() != topic:
+        from .keyboards import legacy_group_storage_panel
+        text = ('<b>🎒 Личное снаряжение — хранение вещей игроков</b>\n\n'
+                'Кладовщик принимает личные вещи и отмечает их возврат. '
+                'Общий запас и заявки на выдачу находятся в теме «Снаряжение группировки».')
+        markup = legacy_group_storage_panel()
     if code == "nicks":
         counts = await db.position_counts()
         role_lines: list[str] = []
@@ -808,7 +831,14 @@ async def t_reward(m:Message,state:FSMContext): await state.update_data(t_reward
 @router.message(GroupTargetCreate.location, F.chat.type.in_(GROUP_TYPES), ~F.text.startswith("/"))
 async def t_location(m:Message,db:Database,config:Config,state:FSMContext):
     if not m.from_user or not await has_permission(m.from_user.id,"targets.manage",db,config): return
-    d=await state.get_data(); loc=None if (m.text or '').strip()=='-' else (m.text or '').strip(); tid=await db.target_create(d['t_name'],d['t_reason'],d['t_reward'],loc,m.from_user.id); await safe_delete(m); rows=await db.target_list(100); t=next(x for x in rows if x['id']==tid)
+    d=await state.get_data(); loc=None if (m.text or '').strip()=='-' else (m.text or '').strip()
+    try:
+        tid=await db.target_create(d['t_name'],d['t_reason'],d['t_reward'],loc,m.from_user.id)
+    except ValueError as exc:
+        await state.clear()
+        await topic_answer(m, escape(str(exc)))
+        return
+    await safe_delete(m); rows=await db.target_list(100); t=next(x for x in rows if x['id']==tid)
     flow_id=d.get("flow_message_id")
     if flow_id:
         try: await m.bot.edit_message_text(chat_id=m.chat.id,message_id=int(flow_id),text=target_card(t),reply_markup=target_kb(tid,'active'))
@@ -818,7 +848,11 @@ async def t_location(m:Message,db:Database,config:Config,state:FSMContext):
 @router.callback_query(F.data.regexp(r"^v7target:(active|taken|done|cancelled):\d+$"))
 async def target_action(cb:CallbackQuery,db:Database,config:Config):
     if not await has_permission(cb.from_user.id,"targets.manage",db,config): return await cb.answer("Недостаточно прав",show_alert=True)
-    _,status,raw=cb.data.split(':'); await db.target_set_status(int(raw),status,cb.from_user.id,cb.from_user.id if status=='taken' else None); t=await db.target_get(int(raw))
+    _,status,raw=cb.data.split(':')
+    ok = await db.target_set_status(int(raw),status,cb.from_user.id,cb.from_user.id if status=='taken' else None)
+    if not ok:
+        return await cb.answer('Эта цель управляется через Дипломатию.', show_alert=True)
+    t=await db.target_get(int(raw))
     if t:
         try: await cb.message.edit_text(target_card(t),reply_markup=target_kb(t['id'],t['status']))
         except Exception: pass

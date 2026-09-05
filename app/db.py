@@ -3,10 +3,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from contextlib import closing
+import sqlite3
 
 import aiosqlite
 
 from .roles import ROLE_CAPACITIES
+from .community_db import CommunityDatabase
 
 
 def utc_now() -> str:
@@ -111,11 +114,20 @@ class MarketOrderItem:
     quantity: int
 
 
-class Database:
+class Database(CommunityDatabase):
     def __init__(self, path: Path):
         self.path = path
 
     async def init(self) -> None:
+        # Backup includes committed WAL data and is created only before v8.
+        if self.path.exists() and self.path.stat().st_size:
+            with closing(sqlite3.connect(self.path)) as source:
+                has_settings = source.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='bot_settings'").fetchone()
+                migrated = has_settings and source.execute("SELECT 1 FROM bot_settings WHERE key='community_migration_v1'").fetchone()
+                backup_path = self.path.with_suffix(self.path.suffix + '.pre-v8.bak')
+                if not migrated and not backup_path.exists():
+                    with closing(sqlite3.connect(backup_path)) as destination:
+                        source.backup(destination)
         async with aiosqlite.connect(self.path) as db:
             await db.execute("PRAGMA foreign_keys = ON")
             await db.executescript(
@@ -366,6 +378,8 @@ class Database:
             if "delivery_message_id" not in market_columns:
                 await db.execute("ALTER TABLE market_orders ADD COLUMN delivery_message_id INTEGER")
             await db.commit()
+
+        await self.community_init()
 
     async def upsert_player(
         self, telegram_id: int, username: str | None, full_name: str, game_nickname: str
@@ -973,6 +987,7 @@ class Database:
         return await self.get_role_request(request_id)
 
     async def remember_item_name(self, name: str) -> None:
+        name = (await self.catalogue_save(name))['name']
         now = utc_now()
         async with aiosqlite.connect(self.path) as db:
             await db.execute(
@@ -990,7 +1005,7 @@ class Database:
     async def recent_item_names(self, limit: int = 8) -> list[str]:
         async with aiosqlite.connect(self.path) as db:
             cur = await db.execute(
-                "SELECT name FROM item_names ORDER BY last_used_at DESC, use_count DESC LIMIT ?",
+                "SELECT name FROM catalogue WHERE archived=0 ORDER BY updated_at DESC,id DESC LIMIT ?",
                 (limit,),
             )
             return [r[0] for r in await cur.fetchall()]
@@ -1004,6 +1019,7 @@ class Database:
         comment: str | None,
         accepted_by: int,
     ) -> int:
+        item_name = (await self.catalogue_save(item_name))['name']
         now = utc_now()
         async with aiosqlite.connect(self.path) as db:
             cur = await db.execute(
@@ -1093,6 +1109,7 @@ class Database:
             return cur.rowcount > 0
 
     async def update_item_name(self, item_id: int, name: str) -> bool:
+        name = (await self.catalogue_save(name))['name']
         async with aiosqlite.connect(self.path) as db:
             cur = await db.execute("UPDATE storage_items SET item_name=? WHERE id=? AND status='stored'", (name.strip(), item_id))
             await db.commit()
@@ -1124,6 +1141,7 @@ class Database:
         comment: str | None,
         merchant_target: str | None,
     ) -> int:
+        items = [((await self.catalogue_save(name))['name'],qty) for name,qty in items]
         now = utc_now()
         async with aiosqlite.connect(self.path) as db:
             await db.execute("PRAGMA foreign_keys = ON")
@@ -1317,9 +1335,12 @@ class Database:
             return [dict(r) for r in await cur.fetchall()]
 
     async def gp_stock_upsert(self, item_name: str, quantity: int, actor_id: int) -> None:
-        name = item_name.strip()
+        cat = await self.catalogue_save(item_name)
         qty = max(0, int(quantity))
         async with aiosqlite.connect(self.path) as db:
+            await db.execute("BEGIN IMMEDIATE")
+            current = await db.execute("SELECT name FROM catalogue WHERE id=?", (cat['id'],))
+            name = (await current.fetchone())[0]
             cur = await db.execute("SELECT reserved FROM gp_stock WHERE item_name=? COLLATE NOCASE", (name,))
             row = await cur.fetchone()
             reserved = int(row[0]) if row else 0
@@ -1334,8 +1355,11 @@ class Database:
         await self.audit(actor_id, "gp_stock.set", f"{name}={qty}")
 
     async def gp_stock_delta(self, item_name: str, delta: int, actor_id: int) -> int:
-        name = item_name.strip()
+        cat = await self.catalogue_save(item_name)
         async with aiosqlite.connect(self.path) as db:
+            await db.execute("BEGIN IMMEDIATE")
+            current = await db.execute("SELECT name FROM catalogue WHERE id=?", (cat['id'],))
+            name = (await current.fetchone())[0]
             cur = await db.execute("SELECT quantity,reserved FROM gp_stock WHERE item_name=? COLLATE NOCASE", (name,))
             row = await cur.fetchone()
             current = int(row[0]) if row else 0
@@ -1562,6 +1586,9 @@ class Database:
             return [dict(r) for r in await cur.fetchall()]
 
     async def target_create(self, name: str, reason: str | None, reward: str | None, location: str | None, actor_id: int) -> int:
+        from .community_db import name_key
+        if await self.community_rows("SELECT id FROM factions WHERE name_key=?", (name_key(name),)):
+            raise ValueError("Цели-группировки формируются только через Дипломатию. Используйте её панель.")
         now=utc_now()
         async with aiosqlite.connect(self.path) as db:
             cur=await db.execute("INSERT INTO targets(target_name,reason,reward,last_location,status,created_by,created_at,updated_at) VALUES(?,?,?,?,'active',?,?,?)",(name.strip(),reason,reward,location,actor_id,now,now)); await db.commit(); tid=int(cur.lastrowid)
@@ -1577,6 +1604,10 @@ class Database:
     async def target_set_status(self, target_id: int, status: str, actor_id: int, assigned_to: int | None=None) -> bool:
         if status not in {"active","taken","done","cancelled"}: return False
         async with aiosqlite.connect(self.path) as db:
+            await db.execute("BEGIN IMMEDIATE")
+            cur = await db.execute("SELECT 1 FROM faction_targets WHERE target_id=?", (target_id,))
+            if await cur.fetchone():
+                return False
             cur=await db.execute("UPDATE targets SET status=?,assigned_to=?,updated_at=? WHERE id=?",(status,assigned_to,utc_now(),target_id)); await db.commit()
         if cur.rowcount: await self.audit(actor_id,"target.status",f"#{target_id} {status}")
         return cur.rowcount>0

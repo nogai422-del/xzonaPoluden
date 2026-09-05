@@ -62,7 +62,7 @@ POSITIONS: dict[str, PositionSpec] = {
     ),
     "storekeeper": PositionSpec(
         "storekeeper",
-        "Кладовщик",
+        "Кладовщик (Старшина)",
         frozenset({"market.create", "storage.manage", "storage.view"}),
     ),
     "sho_commander": PositionSpec(
@@ -147,6 +147,8 @@ INTERNAL_ALIASES: dict[str, str] = {
     _norm("Дипломат"): "diplomat",
     _norm("Законодатель (Дипломат)"): "diplomat",
     _norm("Кладовщик"): "storekeeper",
+    _norm("Старшина"): "storekeeper",
+    _norm("Кладовщик (Старшина)"): "storekeeper",
     _norm("Командир ШО"): "sho_commander",
     _norm("Рядовой"): "private",
 }
