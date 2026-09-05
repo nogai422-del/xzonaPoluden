@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+import secrets
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
@@ -37,6 +38,7 @@ class PendingLogin:
     phone: str
     phone_code_hash: str
     client: TelegramClient
+    method: str = 'phone'
 
 
 @dataclass(slots=True)
@@ -71,6 +73,12 @@ class TelethonManager:
         self.phone: str | None = None
         self._authorized = False
         self._next_restore_at = 0.0
+        self._qr_task: asyncio.Task | None = None
+        self._qr_id: str | None = None
+        self._qr_state = 'idle'
+        self._qr_url = ''
+        self._qr_expires = 0.0
+        self._qr_error = ''
 
     @property
     def connected(self) -> bool:
@@ -169,9 +177,78 @@ class TelethonManager:
                 client=client,
             )
 
+    async def begin_qr_login(self, api_id: int, api_hash: str, *, expected_id: str | None = None) -> str:
+        async with self._lock:
+            if expected_id is not None and expected_id != self._qr_id:
+                raise RuntimeError('Окно входа устарело. Откройте новую ссылку из бота.')
+            await self._close_pending()
+            client = TelegramClient(StringSession(), api_id, api_hash)
+            try:
+                async def request_qr():
+                    await client.connect()
+                    return await client.qr_login()
+                qr = await asyncio.wait_for(request_qr(), timeout=LOGIN_TIMEOUT)
+            except BaseException:
+                try:
+                    await asyncio.wait_for(client.disconnect(), timeout=2)
+                except Exception:
+                    pass
+                raise
+            pending = PendingLogin(api_id, api_hash, '', '', client, method='qr')
+            self.pending = pending
+            self._qr_id = secrets.token_urlsafe(18)
+            self._qr_url = qr.url
+            self._qr_expires = qr.expires.timestamp()
+            self._qr_state, self._qr_error = 'waiting', ''
+            self._qr_task = asyncio.create_task(self._wait_qr(qr, pending))
+            # QRLogin.wait must register its update handler before showing the QR.
+            await asyncio.sleep(0)
+            return self._qr_id
+
+    async def refresh_qr_login(self, login_id: str) -> str:
+        pending = self.pending
+        if not pending or pending.method != 'qr' or login_id != self._qr_id:
+            raise RuntimeError('Начните вход по QR заново.')
+        return await self.begin_qr_login(pending.api_id, pending.api_hash, expected_id=login_id)
+
+    def qr_status(self, login_id: str) -> dict:
+        if not login_id or login_id != self._qr_id:
+            return {'state': 'expired', 'error': 'Начните вход по QR заново.'}
+        return dict(state=self._qr_state, url=self._qr_url,
+                    expires=self._qr_expires, error=self._qr_error)
+
+    async def _wait_qr(self, qr, pending: PendingLogin) -> None:
+        try:
+            user = await qr.wait()
+            async with self._lock:
+                if self.pending is not pending:
+                    return
+                pending.phone = getattr(user, 'phone', None) or ''
+                await self._finalize_pending()
+                self._qr_state = 'connected'
+        except asyncio.CancelledError:
+            raise
+        except SessionPasswordNeededError:
+            if self.pending is pending:
+                self._qr_state = 'password'
+        except asyncio.TimeoutError:
+            if self.pending is pending:
+                self._qr_state = 'expired'
+                self._qr_error = 'QR-код истёк. Нажмите «Обновить QR-код».'
+        except Exception:
+            if self.pending is pending:
+                self._qr_state = 'error'
+                self._qr_error = 'Не удалось завершить вход. Обновите QR-код и повторите.'
+
     async def submit_code(self, code: str) -> str:
+        async with self._lock:
+            return await self._submit_code_locked(code)
+
+    async def _submit_code_locked(self, code: str) -> str:
         if not self.pending:
             raise RuntimeError("Нет активного подключения. Начните настройку заново.")
+        if self.pending.method != 'phone':
+            raise RuntimeError('Текущий вход ожидает сканирования QR-кода.')
         try:
             await self.pending.client.sign_in(
                 phone=self.pending.phone,
@@ -187,11 +264,21 @@ class TelethonManager:
         await self._finalize_pending()
         return "connected"
 
-    async def submit_password(self, password: str) -> None:
-        if not self.pending:
-            raise RuntimeError("Нет активного подключения. Начните настройку заново.")
-        await self.pending.client.sign_in(password=password)
-        await self._finalize_pending()
+    async def submit_password(self, password: str, *, qr_id: str | None = None) -> None:
+        async with self._lock:
+            if not self.pending:
+                raise RuntimeError("Нет активного подключения. Начните настройку заново.")
+            if qr_id is not None and (qr_id != self._qr_id or self.pending.method != 'qr'):
+                raise RuntimeError('Окно входа устарело. Начните вход заново.')
+            if self.pending.method == 'qr' and (qr_id != self._qr_id or self._qr_state != 'password'):
+                raise RuntimeError('Окно входа устарело. Начните вход по QR заново.')
+            is_qr = self.pending.method == 'qr'
+            user = await asyncio.wait_for(self.pending.client.sign_in(password=password), timeout=LOGIN_TIMEOUT)
+            if is_qr:
+                self.pending.phone = getattr(user, 'phone', None) or ''
+            await self._finalize_pending()
+            if is_qr:
+                self._qr_state = 'connected'
 
     async def _finalize_pending(self) -> None:
         if not self.pending:
@@ -217,9 +304,16 @@ class TelethonManager:
         self.last_error = None
 
     async def _close_pending(self) -> None:
+        if self._qr_task:
+            self._qr_task.cancel()
+            await asyncio.gather(self._qr_task, return_exceptions=True)
+            self._qr_task = None
+        self._qr_id = None
+        self._qr_state = 'idle'
+        self._qr_url = ''
         if self.pending:
             try:
-                await self.pending.client.disconnect()
+                await asyncio.wait_for(self.pending.client.disconnect(), timeout=2)
             except Exception:
                 pass
             self.pending = None

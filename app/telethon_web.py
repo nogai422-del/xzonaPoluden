@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import json
+from io import BytesIO
 import secrets
 import time
 from dataclasses import dataclass
@@ -9,6 +12,7 @@ from urllib.parse import quote
 from typing import TYPE_CHECKING
 
 from aiohttp import web
+import qrcode
 
 if TYPE_CHECKING:
     from .telethon_manager import TelethonManager
@@ -20,6 +24,7 @@ class LoginTicket:
     expires_at: float
     phase: str = "credentials"
     used: bool = False
+    qr_id: str | None = None
 
 
 class TelethonWebAuth:
@@ -58,6 +63,8 @@ class TelethonWebAuth:
         app.router.add_post("/telethon/start", self._start_login)
         app.router.add_post("/telethon/code", self._submit_code)
         app.router.add_post("/telethon/password", self._submit_password)
+        app.router.add_get("/telethon/qr/status", self._qr_status)
+        app.router.add_post("/telethon/qr/refresh", self._qr_refresh)
         self._runner = web.AppRunner(app, access_log=None)
         await self._runner.setup()
         self._site = web.TCPSite(self._runner, self.host, self.port)
@@ -119,18 +126,29 @@ class TelethonWebAuth:
         if not loaded:
             return self._html(self._expired_page(), status=403)
         token, ticket = loaded
+        if ticket.qr_id:
+            info = self.telethon.qr_status(ticket.qr_id)
+            if info['state'] == 'connected':
+                ticket.used = True
+                return self._html(self._page('✅ Telethon подключён', 'Вход по QR завершён. Можно закрыть это окно.', token, done=True))
+            if info['state'] == 'password':
+                ticket.phase = 'password'
+                return self._html(self._password_page(token))
+            if ticket.phase == 'qr':
+                return self._html(self._qr_page(token, info))
         connected = await self.telethon.is_connected()
         if connected:
             return self._html(self._page("Telethon уже подключён", "Аккаунт уже авторизован. Можно закрыть это окно.", token, done=True))
         if ticket.phase == "credentials":
             body = f"""
             <h1>🔐 Подключение Telethon</h1>
-            <p>Введите данные приложения Telegram и номер аккаунта, от имени которого бот прочитает старую историю тем.</p>
+            <p>Введите API ID и API HASH приложения Telegram, затем выберите вход по QR-коду или по номеру телефона.</p>
             <form method="post" action="/telethon/start?t={escape(token)}">
               <label>API ID<input name="api_id" inputmode="numeric" autocomplete="off" required></label>
               <label>API HASH<input name="api_hash" autocomplete="off" required></label>
-              <label>Телефон<input name="phone" type="tel" placeholder="+79990000000" autocomplete="tel" required></label>
-              <button type="submit">Получить код Telegram</button>
+              <button type="submit" name="method" value="qr">Войти по QR-коду</button>
+              <label>Телефон — только для входа по коду<input name="phone" type="tel" placeholder="+79990000000" autocomplete="tel"></label>
+              <button type="submit" name="method" value="phone">Получить код Telegram</button>
             </form>
             <p class="hint">API HASH и код входа не публикуются в Telegram. Сессия после входа хранится в базе в зашифрованном виде.</p>
             """
@@ -150,14 +168,21 @@ class TelethonWebAuth:
         raw_api_id = str(data.get("api_id", "")).strip()
         api_hash = str(data.get("api_hash", "")).strip()
         phone = str(data.get("phone", "")).strip().replace(" ", "")
-        if not raw_api_id.isdigit() or len(api_hash) < 16 or not phone.startswith("+"):
+        method = str(data.get('method', 'phone'))
+        if method not in {'phone','qr'} or not raw_api_id.isdigit() or int(raw_api_id) <= 0 or len(api_hash) < 16 or (method == 'phone' and not phone.startswith("+")):
             return self._html(self._error_page(token, "Проверьте API ID, API HASH и телефон в международном формате."), status=400)
         try:
             async with self._lock:
+                if self._ticket(request, expected_phase='credentials') is None:
+                    return self._html(self._expired_page(), status=403)
+                if method == 'qr':
+                    ticket.qr_id = await self.telethon.begin_qr_login(int(raw_api_id), api_hash)
+                    ticket.phase = 'qr'
+                    return self._html(self._qr_page(token, self.telethon.qr_status(ticket.qr_id)))
                 await self.telethon.begin_login(int(raw_api_id), api_hash, phone)
+                ticket.phase = 'code'
         except Exception as exc:
             return self._html(self._error_page(token, f"Не удалось запросить код: {type(exc).__name__}: {exc}"), status=400)
-        ticket.phase = "code"
         return self._html(self._code_page(token, notice="Код отправлен Telegram. Введите его ниже."))
 
     async def _submit_code(self, request: web.Request) -> web.Response:
@@ -191,11 +216,75 @@ class TelethonWebAuth:
             return self._html(self._password_page(token, error="Введите пароль двухэтапной аутентификации."), status=400)
         try:
             async with self._lock:
-                await self.telethon.submit_password(password)
+                if self._ticket(request, expected_phase='password') is None:
+                    return self._html(self._expired_page(), status=403)
+                await self.telethon.submit_password(password, qr_id=ticket.qr_id)
         except Exception as exc:
             return self._html(self._password_page(token, error=f"Не удалось войти: {exc}"), status=400)
         ticket.used = True
         return self._html(self._page("✅ Telethon подключён", "Авторизация завершена. Пароль 2FA не сохранён. Окно можно закрыть.", token, done=True))
+
+    async def _qr_status(self, request: web.Request) -> web.Response:
+        loaded = self._ticket(request)
+        if not loaded or not loaded[1].qr_id:
+            return web.json_response({'state':'expired'}, status=403, headers={'Cache-Control':'no-store'})
+        _, ticket = loaded
+        info = self.telethon.qr_status(ticket.qr_id)
+        if info['state'] == 'password':
+            ticket.phase = 'password'
+        # The QR token itself never leaves the protected HTML page.
+        return web.json_response({'state':info['state'], 'expires':info.get('expires',0)}, headers={'Cache-Control':'no-store'})
+
+    async def _qr_refresh(self, request: web.Request) -> web.Response:
+        async with self._lock:
+            loaded = self._ticket(request, expected_phase='qr')
+            if not loaded or not loaded[1].qr_id:
+                return self._html(self._expired_page(),status=403)
+            token,ticket = loaded
+            info = self.telethon.qr_status(ticket.qr_id)
+            if info['state'] in ('connected','password'):
+                return web.HTTPSeeOther('/telethon?t='+quote(token))
+            try:
+                ticket.qr_id = await self.telethon.refresh_qr_login(ticket.qr_id)
+            except Exception:
+                return self._html(self._error_page(token,'Не удалось обновить QR-код. Откройте новую ссылку из бота.'),status=400)
+            return self._html(self._qr_page(token,self.telethon.qr_status(ticket.qr_id)))
+
+    def _qr_page(self, token: str, info: dict) -> str:
+        picture = ''
+        if info['state'] == 'waiting':
+            stream = BytesIO()
+            qrcode.make(info['url'],box_size=8,border=4).save(stream,format='PNG')
+            png = base64.b64encode(stream.getvalue()).decode('ascii')
+            picture = f'<img id="qr" src="data:image/png;base64,{png}" alt="QR-код входа Telegram" style="width:280px;max-width:100%;image-rendering:pixelated">'
+        status = 'Ожидаю подтверждения в Telegram…' if picture else info.get('error') or 'QR-код истёк. Обновите его.'
+        status_url = json.dumps('/telethon/qr/status?t='+quote(token))
+        next_url = json.dumps('/telethon?t='+quote(token))
+        return self._shell(f'''
+        <h1>Вход по QR-коду</h1>
+        <p>На телефоне откройте Telegram → Настройки → Устройства → Подключить устройство.
+        Отсканируйте QR-код и подтвердите вход. Удобнее открыть эту страницу на компьютере.</p>
+        {picture}<p id="status" class="ok">{escape(status)}</p>
+        <form method="post" action="/telethon/qr/refresh?t={escape(token)}">
+          <button type="submit">Обновить QR-код</button>
+        </form>
+        <p class="hint">Если включён облачный пароль, после сканирования появится форма 2FA.</p>
+        <script>
+        async function checkQR() {{
+          try {{
+            const r = await fetch({status_url}, {{cache:'no-store'}});
+            const s = await r.json();
+            if (s.state === 'connected' || s.state === 'password') {{location.replace({next_url}); return;}}
+            if (!r.ok || s.state === 'expired' || s.state === 'error') {{
+              const image = document.getElementById('qr'); if(image) image.remove();
+              document.getElementById('status').textContent = r.ok ? 'QR-код недействителен. Обновите его.' : 'Ссылка истекла. Запросите новую ссылку в боте.';
+              return;
+            }}
+          }} catch(e) {{ document.getElementById('status').textContent='Связь прервалась. Повторяю проверку…'; }}
+          setTimeout(checkQR, 2000);
+        }}
+        setTimeout(checkQR, 1000);
+        </script>''')
 
     def _code_page(self, token: str, *, notice: str = "", error: str = "") -> str:
         extra = ""
@@ -250,7 +339,8 @@ class TelethonWebAuth:
 
     @staticmethod
     def _html(text: str, *, status: int = 200) -> web.Response:
-        return web.Response(text=text, status=status, content_type="text/html", charset="utf-8")
+        return web.Response(text=text, status=status, content_type="text/html", charset="utf-8",
+                            headers={'Cache-Control':'no-store','Referrer-Policy':'no-referrer'})
 
     @staticmethod
     def _shell(body: str) -> str:
