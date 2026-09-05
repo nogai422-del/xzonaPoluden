@@ -101,49 +101,7 @@ class CommunityDatabase:
                 );
                 CREATE INDEX IF NOT EXISTS idx_warehouse_state ON warehouse_requests(status,id);
                 CREATE INDEX IF NOT EXISTS idx_sale_state ON sale_ads(status,id);
-                CREATE TABLE IF NOT EXISTS warehouse_categories (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    name TEXT NOT NULL,
-                    name_key TEXT NOT NULL UNIQUE,
-                    sort_order INTEGER NOT NULL DEFAULT 100,
-                    archived INTEGER NOT NULL DEFAULT 0,
-                    created_by INTEGER,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS warehouse_movements (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    item_id INTEGER NOT NULL REFERENCES catalogue(id),
-                    movement_type TEXT NOT NULL CHECK(movement_type IN ('receive','issue','request_issue','correction')),
-                    quantity INTEGER NOT NULL CHECK(quantity > 0),
-                    actor_id INTEGER NOT NULL,
-                    counterparty TEXT,
-                    note TEXT,
-                    request_id INTEGER REFERENCES warehouse_requests(id),
-                    created_at TEXT NOT NULL
-                );
-                CREATE INDEX IF NOT EXISTS idx_warehouse_movements_item ON warehouse_movements(item_id,id DESC);
-                CREATE INDEX IF NOT EXISTS idx_warehouse_movements_created ON warehouse_movements(id DESC);
             """)
-            # Warehouse v8.2 migration: categories and movement journal.
-            cat_cols = {r[1] for r in await (await conn.execute("PRAGMA table_info(catalogue)")).fetchall()}
-            if 'category_id' not in cat_cols:
-                await conn.execute("ALTER TABLE catalogue ADD COLUMN category_id INTEGER REFERENCES warehouse_categories(id)")
-            for order, label in enumerate(('Оружие', 'Экипировка', 'Артефакты'), start=1):
-                await conn.execute(
-                    "INSERT OR IGNORE INTO warehouse_categories(name,name_key,sort_order,created_at,updated_at) VALUES(?,?,?,?,?)",
-                    (label, name_key(label), order * 10, now(), now()),
-                )
-            misc = (await rows(conn, "SELECT id FROM warehouse_categories WHERE name_key=?", (name_key('Без раздела'),)))
-            if not misc:
-                await conn.execute(
-                    "INSERT INTO warehouse_categories(name,name_key,sort_order,created_at,updated_at) VALUES(?,?,?,?,?)",
-                    ('Без раздела', name_key('Без раздела'), 999, now(), now()),
-                )
-                misc = (await rows(conn, "SELECT id FROM warehouse_categories WHERE name_key=?", (name_key('Без раздела'),)))
-            await conn.execute("UPDATE catalogue SET category_id=? WHERE category_id IS NULL", (misc[0]['id'],))
-            # Finish the schema/category migration before the legacy data transaction.
-            await conn.commit()
             # One-time import: retain player deposits and old orders as history.
             marker = await rows(conn, "SELECT value FROM bot_settings WHERE key='community_migration_v1'")
             if not marker:
@@ -174,9 +132,6 @@ class CommunityDatabase:
                         await conn.execute("INSERT OR IGNORE INTO faction_relations VALUES(?,?,?,?,?)", (*sorted((own, other)), r['relation'], r['updated_by'], r['updated_at']))
                 await conn.execute("INSERT INTO bot_settings(key,value,updated_at) VALUES('community_migration_v1','1',?)", (now(),))
                 await self._reconcile_targets(conn, 0)
-            # Items imported during the one-time migration may have been created after
-            # the first category backfill above. Keep every active item reachable.
-            await conn.execute("UPDATE catalogue SET category_id=? WHERE category_id IS NULL", (misc[0]['id'],))
             await conn.commit()
 
     async def community_rows(self, sql, args=()):
@@ -217,27 +172,19 @@ class CommunityDatabase:
         name = clean_name(name)
         async with aiosqlite.connect(self.path) as conn:
             conn.row_factory = aiosqlite.Row
-            misc = await rows(conn, "SELECT id FROM warehouse_categories WHERE name_key=?", (name_key('Без раздела'),))
-            category_id = misc[0]['id'] if misc else None
-            await conn.execute("""INSERT INTO catalogue(name,name_key,updated_at,category_id) VALUES(?,?,?,?)
-                ON CONFLICT(name_key) DO UPDATE SET archived=0,updated_at=excluded.updated_at,
-                category_id=COALESCE(catalogue.category_id,excluded.category_id)""", (name, name_key(name), now(), category_id))
+            await conn.execute("INSERT INTO catalogue(name,name_key,updated_at) VALUES(?,?,?) ON CONFLICT(name_key) DO UPDATE SET archived=0,updated_at=excluded.updated_at", (name, name_key(name), now()))
             item = (await rows(conn, "SELECT * FROM catalogue WHERE name_key=?", (name_key(name),)))[0]
             await conn.commit()
             return item
 
-    async def catalogue_list(self, page=0, search="", archived=False, category_id=None):
-        return await self.community_rows("""SELECT c.*,wc.name AS category_name,COALESCE(s.quantity,0) AS quantity,COALESCE(s.reserved,0) AS reserved
+    async def catalogue_list(self, page=0, search="", archived=False):
+        return await self.community_rows("""SELECT c.*,COALESCE(s.quantity,0) AS quantity,COALESCE(s.reserved,0) AS reserved
             FROM catalogue c LEFT JOIN gp_stock s ON s.item_name=c.name COLLATE NOCASE
-            LEFT JOIN warehouse_categories wc ON wc.id=c.category_id
-            WHERE c.archived=? AND instr(c.name_key,?)>0 AND (? IS NULL OR c.category_id=?)
-            ORDER BY COALESCE(wc.sort_order,999),c.name_key LIMIT 9 OFFSET ?""",
-            (int(archived), name_key(search), category_id, category_id, max(0,page)*8))
+            WHERE c.archived=? AND instr(c.name_key,?)>0 ORDER BY c.name_key LIMIT 9 OFFSET ?""", (int(archived), name_key(search), max(0,page)*8))
 
     async def catalogue_get(self, item_id):
-        result = await self.community_rows("""SELECT c.*,wc.name AS category_name,COALESCE(s.quantity,0) AS quantity,COALESCE(s.reserved,0) AS reserved
-            FROM catalogue c LEFT JOIN gp_stock s ON s.item_name=c.name COLLATE NOCASE
-            LEFT JOIN warehouse_categories wc ON wc.id=c.category_id WHERE c.id=?""", (item_id,))
+        result = await self.community_rows("""SELECT c.*,COALESCE(s.quantity,0) AS quantity,COALESCE(s.reserved,0) AS reserved
+            FROM catalogue c LEFT JOIN gp_stock s ON s.item_name=c.name COLLATE NOCASE WHERE c.id=?""", (item_id,))
         if not result:
             raise ValueError("Позиция не найдена.")
         return result[0]
@@ -265,130 +212,6 @@ class CommunityDatabase:
                 await conn.execute("UPDATE catalogue SET archived=?,updated_at=? WHERE id=?", (int(archived), now(), item_id))
             await audit(conn, actor, 'catalogue.edit', f'#{item_id} name={name} archived={archived}')
             await conn.commit()
-
-    async def warehouse_categories_list(self, include_archived=False):
-        return await self.community_rows(
-            "SELECT wc.*,COUNT(c.id) AS item_count FROM warehouse_categories wc "
-            "LEFT JOIN catalogue c ON c.category_id=wc.id AND c.archived=0 "
-            "WHERE (?=1 OR wc.archived=0) GROUP BY wc.id ORDER BY wc.sort_order,wc.name_key",
-            (int(include_archived),),
-        )
-
-    async def warehouse_category_save(self, name, actor):
-        name = clean_name(name)
-        async with aiosqlite.connect(self.path) as conn:
-            conn.row_factory = aiosqlite.Row
-            await conn.execute("BEGIN IMMEDIATE")
-            await require_role(conn, actor, {'leader','deputy_leader','storekeeper'})
-            existing = await rows(conn, "SELECT * FROM warehouse_categories WHERE name_key=?", (name_key(name),))
-            if existing:
-                await conn.execute("UPDATE warehouse_categories SET archived=0,name=?,updated_at=? WHERE id=?", (name,now(),existing[0]['id']))
-                cid = existing[0]['id']
-            else:
-                maxrow = await rows(conn, "SELECT COALESCE(MAX(sort_order),0) AS n FROM warehouse_categories")
-                cur = await conn.execute(
-                    "INSERT INTO warehouse_categories(name,name_key,sort_order,created_by,created_at,updated_at) VALUES(?,?,?,?,?,?)",
-                    (name,name_key(name),int(maxrow[0]['n'])+10,actor,now(),now()),
-                )
-                cid = cur.lastrowid
-            await audit(conn, actor, 'warehouse.category.save', f'#{cid} {name}')
-            await conn.commit()
-            return cid
-
-    async def warehouse_category_edit(self, category_id, actor, *, name=None, archived=None):
-        async with aiosqlite.connect(self.path) as conn:
-            conn.row_factory = aiosqlite.Row
-            await conn.execute("BEGIN IMMEDIATE")
-            await require_role(conn, actor, {'leader','deputy_leader','storekeeper'})
-            found = await rows(conn, "SELECT * FROM warehouse_categories WHERE id=?", (category_id,))
-            if not found:
-                raise ValueError('Раздел не найден.')
-            category = found[0]
-            if name is not None:
-                name = clean_name(name)
-                if await rows(conn, "SELECT id FROM warehouse_categories WHERE name_key=? AND id!=?", (name_key(name),category_id)):
-                    raise ValueError('Раздел с таким названием уже существует.')
-                await conn.execute("UPDATE warehouse_categories SET name=?,name_key=?,updated_at=? WHERE id=?", (name,name_key(name),now(),category_id))
-            if archived is not None:
-                if archived:
-                    active = await rows(conn, "SELECT COUNT(*) AS n FROM catalogue WHERE category_id=? AND archived=0", (category_id,))
-                    if active[0]['n']:
-                        raise ValueError('Сначала перенесите или удалите активные предметы из этого раздела.')
-                await conn.execute("UPDATE warehouse_categories SET archived=?,updated_at=? WHERE id=?", (int(archived),now(),category_id))
-            await audit(conn, actor, 'warehouse.category.edit', f'#{category_id} name={name} archived={archived}')
-            await conn.commit()
-
-    async def warehouse_set_item_category(self, item_id, category_id, actor):
-        async with aiosqlite.connect(self.path) as conn:
-            conn.row_factory = aiosqlite.Row
-            await conn.execute("BEGIN IMMEDIATE")
-            await require_role(conn, actor, {'leader','deputy_leader','storekeeper'})
-            if not await rows(conn, "SELECT id FROM warehouse_categories WHERE id=? AND archived=0", (category_id,)):
-                raise ValueError('Раздел недоступен.')
-            cur = await conn.execute("UPDATE catalogue SET category_id=?,updated_at=? WHERE id=?", (category_id,now(),item_id))
-            if cur.rowcount != 1:
-                raise ValueError('Предмет не найден.')
-            await audit(conn, actor, 'warehouse.item.category', f'item={item_id} category={category_id}')
-            await conn.commit()
-
-    async def warehouse_stock_rows(self, category_id=None, page=0, limit=12):
-        return await self.community_rows("""SELECT c.id,c.name,c.category_id,wc.name AS category_name,
-            COALESCE(s.quantity,0) AS quantity,COALESCE(s.reserved,0) AS reserved,
-            COALESCE(s.quantity,0)-COALESCE(s.reserved,0) AS available
-            FROM catalogue c LEFT JOIN gp_stock s ON s.item_name=c.name COLLATE NOCASE
-            LEFT JOIN warehouse_categories wc ON wc.id=c.category_id
-            WHERE c.archived=0 AND (? IS NULL OR c.category_id=?)
-            ORDER BY COALESCE(wc.sort_order,999),c.name_key LIMIT ? OFFSET ?""",
-            (category_id,category_id,limit+1,max(0,page)*limit))
-
-    async def warehouse_receive(self, item_id, quantity, actor, note=''):
-        if not 1 <= int(quantity) <= 1000000:
-            raise ValueError('Количество должно быть от 1 до 1000000.')
-        note = (note or '').strip()[:500]
-        async with aiosqlite.connect(self.path) as conn:
-            conn.row_factory = aiosqlite.Row
-            await conn.execute("BEGIN IMMEDIATE")
-            await require_role(conn, actor, {'leader','deputy_leader','storekeeper'})
-            item = await rows(conn, "SELECT name FROM catalogue WHERE id=? AND archived=0", (item_id,))
-            if not item:
-                raise ValueError('Предмет не найден.')
-            name=item[0]['name']
-            await conn.execute("""INSERT INTO gp_stock(item_name,quantity,reserved,updated_by,updated_at) VALUES(?,?,0,?,?)
-                ON CONFLICT(item_name) DO UPDATE SET quantity=quantity+excluded.quantity,updated_by=excluded.updated_by,updated_at=excluded.updated_at""",
-                (name,int(quantity),actor,now()))
-            await conn.execute("INSERT INTO warehouse_movements(item_id,movement_type,quantity,actor_id,note,created_at) VALUES(?,?,?,?,?,?)",
-                               (item_id,'receive',int(quantity),actor,note,now()))
-            await audit(conn, actor, 'warehouse.receive', f'item={item_id} qty={quantity} note={note}')
-            await conn.commit()
-
-    async def warehouse_direct_issue(self, item_id, quantity, actor, counterparty, note=''):
-        if not 1 <= int(quantity) <= 1000000:
-            raise ValueError('Количество должно быть от 1 до 1000000.')
-        counterparty = ' '.join((counterparty or '').split())[:100]
-        note = (note or '').strip()[:500]
-        if not counterparty:
-            raise ValueError('Укажите, кому выдано имущество.')
-        async with aiosqlite.connect(self.path) as conn:
-            conn.row_factory = aiosqlite.Row
-            await conn.execute("BEGIN IMMEDIATE")
-            await require_role(conn, actor, {'leader','deputy_leader','storekeeper'})
-            item = await rows(conn, "SELECT name FROM catalogue WHERE id=? AND archived=0", (item_id,))
-            if not item:
-                raise ValueError('Предмет не найден.')
-            cur = await conn.execute("UPDATE gp_stock SET quantity=quantity-?,updated_by=?,updated_at=? WHERE item_name=? COLLATE NOCASE AND quantity-reserved>=?",
-                                     (int(quantity),actor,now(),item[0]['name'],int(quantity)))
-            if cur.rowcount != 1:
-                raise ValueError('Недостаточно свободного остатка для выдачи.')
-            await conn.execute("INSERT INTO warehouse_movements(item_id,movement_type,quantity,actor_id,counterparty,note,created_at) VALUES(?,?,?,?,?,?,?)",
-                               (item_id,'issue',int(quantity),actor,counterparty,note,now()))
-            await audit(conn, actor, 'warehouse.issue.direct', f'item={item_id} qty={quantity} to={counterparty} note={note}')
-            await conn.commit()
-
-    async def warehouse_movements_list(self, page=0, limit=8):
-        return await self.community_rows("""SELECT m.*,c.name,p.game_nickname AS actor_nick
-            FROM warehouse_movements m JOIN catalogue c ON c.id=m.item_id
-            LEFT JOIN players p ON p.telegram_id=m.actor_id
-            ORDER BY m.id DESC LIMIT ? OFFSET ?""", (limit+1,max(0,page)*limit))
 
     async def warehouse_create(self, user, item_id, quantity, reason, request_key):
         if not 1 <= quantity <= 1000000 or not 1 <= len(reason) <= 500:
@@ -442,8 +265,6 @@ class CommunityDatabase:
                 cur = await conn.execute("UPDATE gp_stock SET quantity=quantity-?,reserved=reserved-?,updated_by=?,updated_at=? WHERE item_name=? COLLATE NOCASE AND reserved>=? AND quantity>=?", (r['quantity'],r['quantity'],actor,now(),r['name'],r['quantity'],r['quantity']))
                 if cur.rowcount != 1:
                     raise ValueError("Резерв повреждён. Проверьте склад.")
-                await conn.execute("INSERT INTO warehouse_movements(item_id,movement_type,quantity,actor_id,counterparty,note,request_id,created_at) VALUES(?,?,?,?,?,?,?,?)",
-                                   (r['item_id'],'request_issue',r['quantity'],actor,str(r['requester_id']),r['reason'],r['id'],now()))
             if action=='cancel' and expected=='approved':
                 cur = await conn.execute("UPDATE gp_stock SET reserved=reserved-?,updated_by=?,updated_at=? WHERE item_name=? COLLATE NOCASE AND reserved>=?", (r['quantity'],actor,now(),r['name'],r['quantity']))
                 if cur.rowcount != 1:

@@ -16,8 +16,10 @@ def keyboard(*rows):
 
 def storage_panel():
     return keyboard(
-        [("📦 Открыть склад", "c8:wh:home")],
-        [("👤 Мои заявки", "c8:requests:mine:0")],
+        [("📦 Остатки / заявка", "c8:catalog:request:0")],
+        [("📋 Очередь заявок", "c8:requests:all:0"), ("👤 Мои заявки", "c8:requests:mine:0")],
+        [("🛠 Управление складом", "c8:catalog:stock:0"), ("📜 История выдач", "c8:requests:history:0")],
+        [("🗄 Старые записи хранения", "c8:legacy_storage")],
     )
 
 
@@ -116,101 +118,4 @@ def render_matrix(factions, relations):
     draw.text((30,height-53), '+ Союз     = Нейтралитет     × Война     ? Нет данных',font=body,fill='#d5d3a1')
     stream = BytesIO()
     im.save(stream,format='PNG')
-    return stream.getvalue()
-
-
-def _fit_text(draw, text: str, font, max_width: int) -> str:
-    text = str(text)
-    if draw.textlength(text, font=font) <= max_width:
-        return text
-    ell = '…'
-    while text and draw.textlength(text + ell, font=font) > max_width:
-        text = text[:-1]
-    return text + ell
-
-
-def render_warehouse(rows, categories, *, selected_category=None, title='СКЛАД ГРУППИРОВКИ'):
-    """Render a compact PDA-style inventory table for Telegram.
-
-    rows: item dicts with name/category_name/quantity/reserved/available.
-    categories: category dicts. selected_category may be a category id.
-    """
-    width = 1120
-    margin = 34
-    title_font = _font(32)
-    header_font = _font(21)
-    body_font = _font(20)
-    small_font = _font(17)
-
-    category_name = None
-    if selected_category is not None:
-        category_name = next((c['name'] for c in categories if c['id'] == selected_category), None)
-
-    # Group rows for the full overview; category mode is a single table.
-    groups = []
-    if selected_category is not None:
-        groups.append((category_name or 'Раздел', list(rows)))
-    else:
-        by_cat = {}
-        for row in rows:
-            by_cat.setdefault(row.get('category_name') or 'Без раздела', []).append(row)
-        for category in categories:
-            name = category['name']
-            if name in by_cat:
-                groups.append((name, by_cat.pop(name)))
-        groups.extend(sorted(by_cat.items(), key=lambda x: x[0].casefold()))
-
-    line_h = 34
-    group_h = 43
-    header_h = 40
-    table_rows = sum(max(1, len(items)) for _, items in groups)
-    height = 165 + len(groups) * (group_h + header_h) + table_rows * line_h + 70
-    height = max(height, 390)
-
-    im = Image.new('RGB', (width, height), '#151b17')
-    draw = ImageDraw.Draw(im)
-    draw.rectangle((14, 14, width - 14, height - 14), outline='#68734e', width=2)
-    draw.text((margin, 29), f'ПОЛДЕНЬ  /  {title}', font=title_font, fill='#d5d3a1')
-    subtitle = 'Актуальные остатки • свободно = всего − резерв'
-    if category_name:
-        subtitle = f'{category_name} • актуальные остатки • свободно = всего − резерв'
-    draw.text((margin, 77), subtitle, font=small_font, fill='#a3aa91')
-
-    y = 124
-    if not groups:
-        draw.text((margin, y + 28), 'Склад пока пуст.', font=header_font, fill='#e0e1c8')
-    for group_name, items in groups:
-        draw.rectangle((margin, y, width - margin, y + group_h - 5), fill='#252d25')
-        draw.text((margin + 14, y + 8), str(group_name).upper(), font=header_font, fill='#d5d3a1')
-        y += group_h
-
-        # Table header
-        x_name = margin + 14
-        x_total = 760
-        x_res = 875
-        x_free = 985
-        draw.text((x_name, y + 5), 'ПРЕДМЕТ', font=small_font, fill='#929c87')
-        draw.text((x_total, y + 5), 'ВСЕГО', font=small_font, fill='#929c87')
-        draw.text((x_res, y + 5), 'РЕЗЕРВ', font=small_font, fill='#929c87')
-        draw.text((x_free, y + 5), 'СВОБ.', font=small_font, fill='#929c87')
-        draw.line((margin, y + header_h - 4, width - margin, y + header_h - 4), fill='#455047', width=1)
-        y += header_h
-
-        if not items:
-            draw.text((x_name, y + 5), 'Нет предметов', font=body_font, fill='#7d877b')
-            y += line_h
-            continue
-
-        for item in items:
-            name = _fit_text(draw, item['name'], body_font, 680)
-            draw.text((x_name, y + 4), name, font=body_font, fill='#e0e1c8')
-            draw.text((x_total + 35, y + 4), str(item['quantity']), font=body_font, anchor='ma', fill='#e0e1c8')
-            draw.text((x_res + 38, y + 4), str(item['reserved']), font=body_font, anchor='ma', fill='#ded184')
-            free_fill = '#7da85c' if int(item['available']) > 0 else '#c36451'
-            draw.text((x_free + 34, y + 4), str(item['available']), font=body_font, anchor='ma', fill=free_fill)
-            y += line_h
-
-    draw.text((margin, height - 49), 'Склад обновляется автоматически после приёма, выдачи и обработки заявок.', font=small_font, fill='#929c87')
-    stream = BytesIO()
-    im.save(stream, format='PNG', optimize=True)
     return stream.getvalue()
