@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
@@ -19,6 +20,10 @@ from .db import Database
 from .nicks import extract_nickname
 from .roles import parse_profile
 from .security import SecretStore
+
+RESTORE_TIMEOUT = 8
+STATUS_TIMEOUT = 5
+LOGIN_TIMEOUT = 20
 
 
 def utc_now() -> str:
@@ -64,8 +69,16 @@ class TelethonManager:
         self._member_sync_lock = asyncio.Lock()
         self.last_error: str | None = None
         self.phone: str | None = None
+        self._authorized = False
+        self._next_restore_at = 0.0
+
+    @property
+    def connected(self) -> bool:
+        """Cached status: health checks must never perform Telegram RPCs."""
+        return bool(self.client and self._authorized and self.client.is_connected())
 
     async def initialize(self) -> None:
+        self._next_restore_at = time.monotonic() + 30
         auth = await self.db.get_telethon_auth()
         if not auth:
             return
@@ -81,33 +94,49 @@ class TelethonManager:
             self.last_error = "Не удалось расшифровать сохранённую Telethon-сессию."
             return
 
-        client = TelegramClient(StringSession(session_string), api_id, api_hash)
+        client = None
         try:
-            await client.connect()
-            if not await client.is_user_authorized():
-                await client.disconnect()
+            client = TelegramClient(StringSession(session_string), api_id, api_hash)
+            async def restore():
+                await client.connect()
+                return await client.is_user_authorized()
+            if not await asyncio.wait_for(restore(), timeout=RESTORE_TIMEOUT):
+                await asyncio.wait_for(client.disconnect(), timeout=2)
                 self.last_error = "Сохранённая Telethon-сессия больше не авторизована."
                 return
             self.client = client
+            self._authorized = True
             self.phone = auth.get("phone") or None
             self.last_error = None
         except Exception as exc:
             try:
-                await client.disconnect()
+                if client:
+                    await asyncio.wait_for(client.disconnect(), timeout=2)
             except Exception:
                 pass
+            self._authorized = False
             self.last_error = f"{type(exc).__name__}: {exc}"
 
     async def is_connected(self) -> bool:
-        if not self.client:
-            return False
-        try:
-            if not self.client.is_connected():
-                await self.client.connect()
-            return bool(await self.client.is_user_authorized())
-        except Exception as exc:
-            self.last_error = f"{type(exc).__name__}: {exc}"
-            return False
+        async with self._lock:
+            if not self.client and time.monotonic() >= self._next_restore_at:
+                await self.initialize()
+            if not self.client:
+                return False
+            try:
+                async def check():
+                    if not self.client.is_connected():
+                        await self.client.connect()
+                    return bool(await self.client.is_user_authorized())
+                self._authorized = await asyncio.wait_for(check(), timeout=STATUS_TIMEOUT)
+                self.last_error = None if self._authorized else "Сессия отозвана. Подключите Telethon заново."
+                return self._authorized
+            except Exception as exc:
+                self._authorized = False
+                self.last_error = ("Telegram не отвечает. Повторите подключение позже."
+                                   if isinstance(exc, asyncio.TimeoutError)
+                                   else f"{type(exc).__name__}: {exc}")
+                return False
 
     def masked_phone(self) -> str:
         if not self.phone:
@@ -121,14 +150,16 @@ class TelethonManager:
         async with self._lock:
             await self._close_pending()
             client = TelegramClient(StringSession(), api_id, api_hash)
-            await client.connect()
             try:
-                sent = await client.send_code_request(phone)
+                async def request_code():
+                    await client.connect()
+                    return await client.send_code_request(phone)
+                sent = await asyncio.wait_for(request_code(), timeout=LOGIN_TIMEOUT)
             except FloodWaitError as exc:
-                await client.disconnect()
+                await asyncio.wait_for(client.disconnect(), timeout=2)
                 raise RuntimeError(f"Telegram просит подождать {exc.seconds} сек. перед новым кодом.") from exc
             except Exception:
-                await client.disconnect()
+                await asyncio.wait_for(client.disconnect(), timeout=2)
                 raise
             self.pending = PendingLogin(
                 api_id=api_id,
@@ -180,6 +211,7 @@ class TelethonManager:
             except Exception:
                 pass
         self.client = self.pending.client
+        self._authorized = True
         self.phone = self.pending.phone
         self.pending = None
         self.last_error = None
@@ -204,6 +236,7 @@ class TelethonManager:
                     await self.client.disconnect()
                 finally:
                     self.client = None
+                    self._authorized = False
             if clear_saved:
                 await self.db.clear_telethon_auth()
                 self.phone = None

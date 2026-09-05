@@ -1039,6 +1039,8 @@ async def _telethon_admin_view(db: Database, config: Config, bot: Bot, telethon:
         "Разделы бот больше не определяет автоматически — их назначает руководство вручную.",
         "API HASH, код входа и 2FA вводятся только в отдельном браузерном окне.",
     ]
+    if not connected and telethon.last_error:
+        lines += ["", f"⚠️ {escape(telethon.last_error[:300])}"]
     markup = group_telethon_menu(
         connected=connected,
         bot_username=me.username,

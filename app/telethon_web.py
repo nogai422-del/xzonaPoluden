@@ -101,7 +101,7 @@ class TelethonWebAuth:
         return token, ticket
 
     async def _root(self, request: web.Request) -> web.Response:
-        connected = await self.telethon.is_connected()
+        connected = self.telethon.connected
         body = self._shell(
             "<h1>🤖 XZONA Group Bot</h1>"
             "<p class='ok'>Сервис запущен.</p>"
@@ -111,7 +111,7 @@ class TelethonWebAuth:
         return self._html(body)
 
     async def _health(self, request: web.Request) -> web.Response:
-        connected = await self.telethon.is_connected()
+        connected = self.telethon.connected
         return web.json_response({"ok": True, "ready": True, "telethon_connected": connected})
 
     async def _show(self, request: web.Request) -> web.Response:
