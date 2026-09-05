@@ -275,6 +275,7 @@ def legacy_group_market_panel() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [InlineKeyboardButton(text="🛒 Новый заказ", callback_data="gmarket:new")],
             [InlineKeyboardButton(text="📋 Мои заказы", callback_data="gmarket:mine")],
+            [InlineKeyboardButton(text="👨‍💼 Очередь торговца", callback_data="gmarket:queue")],
         ]
     )
 
@@ -318,7 +319,7 @@ def group_admin_menu() -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="🎒 Снаряжение группировки", callback_data="gadmin:storage")],
             [InlineKeyboardButton(text="👥 Ники игроков", callback_data="gadmin:nicks")],
             [InlineKeyboardButton(text="🎖 Роли и доступ", callback_data="gadmin:roles")],
-            [InlineKeyboardButton(text="🛒 Рынок ГП", callback_data="gadmin:market")],
+            [InlineKeyboardButton(text="🛒 Торговец Локи — заказы", callback_data="gadmin:market")],
             [InlineKeyboardButton(text="🧩 Разделы и запуск", callback_data="gadmin:system")],
             [InlineKeyboardButton(text="🔐 Telethon", callback_data="gadmin:telethon")],
         ]

@@ -20,14 +20,15 @@ from .telethon_manager import TelethonManager
 
 router = Router(name="multitask_v7")
 ADMIN_CHAT_TYPES = set(GROUP_TYPES) | {"private"}
-ANNOUNCE_VERSION = "v8.0"
+ANNOUNCE_VERSION = "v8.1"
 
 TOPICS: dict[str, dict[str, str]] = {
     "general": {"label": "General", "emoji": "💬"},
     "nicks": {"label": "Ники игроков", "emoji": "🔑"},
     "storage": {"label": "Снаряжение группировки", "emoji": "🎒"},
     "market": {"label": "Рынок ГП", "emoji": "🪙"},
-    "delivery": {"label": "Пункт выдачи заказов", "emoji": "⚛️"},
+    "trader": {"label": "Торговец Локи", "emoji": "🛒"},
+    "delivery": {"label": "Готовые заказы", "emoji": "⚛️"},
     "gp_stock": {"label": "Снаряжение ГП", "emoji": "🪖"},
     "events": {"label": "Мероприятия", "emoji": "🎮"},
     "diplomacy": {"label": "Союзы и Война", "emoji": "🤝"},
@@ -91,6 +92,12 @@ async def _internal_user(user_id: int, db: Database, config: Config) -> bool:
 
 def topic_intro(code: str) -> tuple[str, InlineKeyboardMarkup | None]:
     from .community_views import storage_panel, market_panel, diplomacy_panel
+    if code == 'trader':
+        from .keyboards import legacy_group_market_panel
+        return ('<b>🛒 Торговец Локи — заказы товаров</b>\n\n'
+                'Здесь участники заказывают товары у нашего торговца: предметы → количество → комментарий → отправка. '
+                'Торговец принимает заказ, отмечает сборку и выдачу. Готовые заказы также появляются в Пункте выдачи.\n\n'
+                'Личные объявления о продаже публикуются в теме «Рынок ГП». Заказы Локи не расходуют склад группировки.', legacy_group_market_panel())
     if code in ('storage', 'gp_stock'):
         return ('<b>📦 Снаряжение группировки — склад</b>\n\n'
                 'Игрок выбирает предмет и подаёт заявку. Лидер / Заместитель одобряет её, '
@@ -129,8 +136,8 @@ def topic_intro(code: str) -> tuple[str, InlineKeyboardMarkup | None]:
             "Участники формируют заказы здесь. Торговец принимает заказ, отмечает сборку, после чего он автоматически появляется в Пункте выдачи."
         ),
         "delivery": (
-            "<b>⚛️ Пункт выдачи заказов</b>\n\n"
-            "Здесь появляются только собранные заказы. Торговец или руководство отмечает фактическую выдачу игроку."
+            "<b>⚛️ Готовые заказы — Торговец Локи</b>\n\n"
+            "Когда Локи отмечает заказ собранным, здесь появляется уведомление с упоминанием игрока. После получения торговец отмечает выдачу."
         ),
         "gp_stock": (
             "<b>🪖 Снаряжение ГП</b>\n\n"
@@ -317,6 +324,9 @@ async def _set_topic(message: Message, db: Database, config: Config, code: str, 
     if not message.from_user or not await has_permission(message.from_user.id, permission, db, config):
         await temp_answer(message, "Недостаточно прав.", ttl=45)
         return
+    if code == 'trader' and (message.chat.id, _thread(message)) == await db.get_topic('market'):
+        await temp_answer(message, 'Рынок ГП и Торговец Локи должны быть в разных темах.', ttl=60)
+        return
     await remove_old_topic_panel(message.bot, db, code, message.chat.id, _thread(message))
     await db.set_topic(code, message.chat.id, _thread(message))
     await db.set_setting("primary_chat_id", str(message.chat.id))
@@ -326,8 +336,14 @@ async def _set_topic(message: Message, db: Database, config: Config, code: str, 
     await delete_incoming_later(message)
 
 
-@router.message(Command("set_delivery_topic"), F.chat.type.in_(GROUP_TYPES))
+@router.message(Command("set_delivery_topic", "set_ready_orders_topic"), F.chat.type.in_(GROUP_TYPES))
 async def set_delivery(message: Message, db: Database, config: Config): await _set_topic(message, db, config, "delivery", "delivery.manage")
+@router.message(Command("set_trader_topic", "set_loki_topic"), F.chat.type.in_(GROUP_TYPES))
+async def set_trader(message: Message, db: Database, config: Config): await _set_topic(message, db, config, 'trader', 'market.manage')
+@router.message(Command('trader_panel'), F.chat.type.in_(GROUP_TYPES))
+async def trader_panel(message: Message, db: Database, config: Config):
+    if (message.chat.id, _thread(message)) == await db.get_topic('trader') and await has_permission(message.from_user.id,'market.create',db,config):
+        await announce_topic(message.bot,db,'trader',force=True)
 @router.message(Command("set_gp_stock_topic"), F.chat.type.in_(GROUP_TYPES))
 async def set_stock(message: Message, db: Database, config: Config): await _set_topic(message, db, config, "gp_stock", "gp_stock.manage")
 @router.message(Command("set_events_topic"), F.chat.type.in_(GROUP_TYPES))
@@ -902,23 +918,35 @@ async def _set_mirror_source(m:Message,db:Database,config:Config,kind:str,perm:s
 
 # -------------------- Delivery --------------------
 def delivery_text(order,items)->str:
-    lines=[f"<b>⚛️ ЗАКАЗ ГОТОВ К ВЫДАЧЕ #{order.id}</b>","",f"👤 <b>{escape(order.requester_nickname)}</b>","", "<b>📦 Состав:</b>"]
+    from .group_handlers import merchant_display
+    title = 'ЗАКАЗ ВЫДАН' if order.workflow_status == 'issued' else 'ЗАКАЗ ГОТОВ К ВЫДАЧЕ'
+    lines=[f"<b>⚛️ {title} #{order.id}</b>",
+           f"🛒 Торговец Локи: {merchant_display(order.merchant_target)}", "",
+           f'<a href="tg://user?id={order.requester_id}">{escape(order.requester_nickname)}</a>, '
+           + ('заказ выдан.' if order.workflow_status == 'issued' else 'ваш заказ готов! Можно забирать.'),
+           "", "<b>📦 Состав:</b>"]
     lines += [f"• {escape(x.item_name)} × <b>{x.quantity}</b>" for x in items]
     lines += ["",f"📌 {WORKFLOW_LABELS.get(order.workflow_status,order.workflow_status)}"]
     return "\n".join(lines)
 
+
 def delivery_kb(order_id:int)->InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="✅ Выдан игроку",callback_data=f"v7delivery:issue:{order_id}")]])
 
+_delivery_publish_lock = asyncio.Lock()
+
 async def publish_delivery_card(bot:Bot,db:Database,order_id:int)->bool:
-    loaded=await db.get_market_order(order_id); topic=await db.get_topic('delivery')
-    if not loaded or not topic: return False
-    existing=await db.get_market_delivery_ref(order_id)
-    if existing: return True
-    order,items=loaded
-    sent=await bot.send_message(topic[0],delivery_text(order,items),reply_markup=delivery_kb(order_id),**_topic_kwargs(topic[1]))
-    await db.set_market_delivery_message(order_id,topic[0],topic[1],sent.message_id)
-    return True
+    async with _delivery_publish_lock:
+        loaded=await db.get_market_order(order_id); topic=await db.get_topic('delivery')
+        if not loaded or not topic or loaded[0].workflow_status != 'assembled':
+            return False
+        existing=await db.get_market_delivery_ref(order_id)
+        if existing and existing[:2] == topic:
+            return True
+        order,items=loaded
+        sent=await bot.send_message(topic[0],delivery_text(order,items),reply_markup=delivery_kb(order_id),**_topic_kwargs(topic[1]))
+        await db.set_market_delivery_message(order_id,topic[0],topic[1],sent.message_id)
+        return True
 
 @router.callback_query(F.data == "v7delivery:list")
 async def delivery_list(cb:CallbackQuery,db:Database,config:Config):
@@ -934,20 +962,18 @@ async def delivery_list(cb:CallbackQuery,db:Database,config:Config):
     await temp_callback_message(cb, "<b>⚛️ Готовые к выдаче</b>\n\n"+("\n".join(f"• Заказ <b>#{o.id}</b> — {escape(o.requester_nickname)}" for o in ready) if ready else "Сейчас готовых заказов нет."), ttl=config.temp_message_ttl); await cb.answer()
 @router.callback_query(F.data.regexp(r"^v7delivery:issue:\d+$"))
 async def delivery_issue(cb:CallbackQuery,db:Database,config:Config,bot:Bot):
-    if not await has_permission(cb.from_user.id,'delivery.manage',db,config): return await cb.answer("Недостаточно прав",show_alert=True)
     oid = int(cb.data.rsplit(':', 1)[1])
     loaded = await db.get_market_order(oid)
     if not loaded or loaded[0].workflow_status != 'assembled':
         return await cb.answer("Заказ уже не ожидает выдачи.", show_alert=True)
     order, items = loaded
-    ok, shortages = await db.gp_stock_consume_reserved([(x.item_name, x.quantity) for x in items], cb.from_user.id)
-    if not ok:
-        lines = ["⚠️ Нельзя закрыть выдачу: резерв склада недостаточен:"] + [
-            f"• {name}: нужно {need}, в резерве {have}" for name, need, have in shortages
-        ]
-        await temp_callback_message(cb, "\n".join(lines), ttl=120)
-        return await cb.answer("Проверьте склад ГП", show_alert=True)
-    await db.set_market_workflow_status(oid, 'issued')
+    from .group_handlers import merchant_authorized
+    if not await merchant_authorized(cb.from_user.id,cb.from_user.username,order.merchant_target,db,config):
+        return await cb.answer("Выдачу отмечает торговец или руководство.",show_alert=True)
+    try:
+        await db.advance_order(oid, 'issued', cb.from_user.id)
+    except ValueError as exc:
+        return await cb.answer(str(exc)[:190], show_alert=True)
     order, items = (await db.get_market_order(oid))
     await refresh_order_cards(bot, order, items)
     try:
@@ -974,6 +1000,7 @@ async def system_admin(cb: CallbackQuery, db: Database, config: Config, telethon
         "<code>/set_nicks_topic</code> — Ники игроков",
         "<code>/set_storage_topic</code> — Снаряжение группировки",
         "<code>/set_market_topic</code> — Рынок ГП",
+        "<code>/set_trader_topic</code> — Торговец Локи (заказы)",
         "<code>/set_delivery_topic</code> — Пункт выдачи заказов",
         "<code>/set_gp_stock_topic</code> — Снаряжение ГП",
         "<code>/set_events_topic</code> — Мероприятия",

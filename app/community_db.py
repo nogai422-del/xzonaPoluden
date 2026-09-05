@@ -60,6 +60,9 @@ class CommunityDatabase:
         async with aiosqlite.connect(self.path) as conn:
             conn.row_factory = aiosqlite.Row
             await conn.executescript("""
+                CREATE TABLE IF NOT EXISTS trader_orders (
+                    order_id INTEGER PRIMARY KEY REFERENCES market_orders(id)
+                );
                 CREATE TABLE IF NOT EXISTS catalogue (
                     id INTEGER PRIMARY KEY, name TEXT NOT NULL, name_key TEXT NOT NULL UNIQUE,
                     archived INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL
@@ -135,6 +138,35 @@ class CommunityDatabase:
         async with aiosqlite.connect(self.path) as conn:
             conn.row_factory = aiosqlite.Row
             return await rows(conn, sql, args)
+
+    async def advance_order(self, order_id, status, actor):
+        transitions = {'pending': {'accepted','rejected'}, 'accepted': {'assembled','rejected'}, 'assembled': {'issued'}}
+        async with aiosqlite.connect(self.path) as conn:
+            conn.row_factory = aiosqlite.Row
+            await conn.execute('BEGIN IMMEDIATE')
+            found = await rows(conn, 'SELECT workflow_status FROM market_orders WHERE id=?', (order_id,))
+            if not found or status not in transitions.get(found[0]['workflow_status'], set()):
+                raise ValueError('Этот переход статуса уже недоступен.')
+            previous = found[0]['workflow_status']
+            is_trader = bool(await rows(conn, 'SELECT 1 FROM trader_orders WHERE order_id=?', (order_id,)))
+            if not is_trader:
+                # Orders created before the split keep their original reserves.
+                items = await rows(conn, 'SELECT item_name,SUM(quantity) AS quantity FROM market_order_items WHERE order_id=? GROUP BY item_name COLLATE NOCASE', (order_id,))
+                for item in items:
+                    name, qty = item['item_name'],item['quantity']
+                    if status == 'accepted':
+                        cur = await conn.execute('UPDATE gp_stock SET reserved=reserved+?,updated_by=?,updated_at=? WHERE item_name=? COLLATE NOCASE AND quantity-reserved>=?', (qty,actor,now(),name,qty))
+                    elif status == 'issued':
+                        cur = await conn.execute('UPDATE gp_stock SET quantity=quantity-?,reserved=reserved-?,updated_by=?,updated_at=? WHERE item_name=? COLLATE NOCASE AND quantity>=? AND reserved>=?', (qty,qty,actor,now(),name,qty,qty))
+                    elif status == 'rejected' and previous == 'accepted':
+                        cur = await conn.execute('UPDATE gp_stock SET reserved=reserved-?,updated_by=?,updated_at=? WHERE item_name=? COLLATE NOCASE AND reserved>=?', (qty,actor,now(),name,qty))
+                    else:
+                        continue
+                    if cur.rowcount != 1:
+                        raise ValueError(f'Недостаточно остатка или резерва для старого заказа: {name}.')
+            await conn.execute('UPDATE market_orders SET workflow_status=? WHERE id=?', (status,order_id))
+            await audit(conn,actor,'trader.status',f'#{order_id} {previous} → {status}')
+            await conn.commit()
 
     async def catalogue_save(self, name):
         name = clean_name(name)

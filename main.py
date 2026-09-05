@@ -66,7 +66,7 @@ def _fallback_health(error: BaseException) -> None:
 
 
 def run() -> None:
-    print("[XZONA BOOT] Starting XZONA Group Bot v8.0", flush=True)
+    print("[XZONA BOOT] Starting XZONA Group Bot v8.1", flush=True)
     print(
         "[XZONA BOOT] env: "
         f"BOT_TOKEN={'yes' if any(os.getenv(k) for k in ('BOT_TOKEN','TELEGRAM_BOT_TOKEN','TOKEN','API_TOKEN')) else 'NO'}, "

@@ -773,22 +773,22 @@ async def telethon_sync_nicks(callback: CallbackQuery, db: Database, config: Con
 # Market GP
 # ---------------------------------------------------------------------------
 
-@router.message(F.text == "🛒 Рынок ГП")
+@router.message(F.text == "🛒 Торговец Локи")
 async def market_home(message: Message, db: Database, state: FSMContext, config: Config, bot: Bot):
-    topic = await db.get_market_topic()
+    topic = await db.get_topic('trader')
     if message.chat.type == "private":
         await state.clear()
-        await topic_answer(message, "🛒 Заказы теперь оформляются прямо в настроенной теме «Рынок ГП» игровой группы.")
+        await topic_answer(message, "🛒 Заказы теперь оформляются прямо в настроенной теме «Торговец Локи» игровой группы.")
         return
     if topic and message.is_topic_message and (message.chat.id, message.message_thread_id) == topic:
-        await topic_answer(message, "🛒 <b>Рынок ГП</b>\n\nИспользуйте панель темы для создания заказа.")
+        await topic_answer(message, "🛒 <b>Торговец Локи</b>\n\nИспользуйте панель темы для создания заказа.")
         return
 
 
 @router.callback_query(F.data == "market:new")
 async def market_new(callback: CallbackQuery, db: Database, state: FSMContext, config: Config):
     await state.clear()
-    await callback.answer("Оформляйте заказ в теме «Рынок ГП» игровой группы.", show_alert=True)
+    await callback.answer("Оформляйте заказ в теме «Торговец Локи» игровой группы.", show_alert=True)
     return
 
 
@@ -870,7 +870,7 @@ async def market_cancel(callback: CallbackQuery, state: FSMContext):
 @router.callback_query(F.data == "market:submit")
 async def market_submit(callback: CallbackQuery, db: Database, state: FSMContext, bot: Bot, telethon: TelethonManager, config: Config):
     if not await has_permission(callback.from_user.id, "market.create", db, config):
-        await callback.answer("Рынок ГП доступен только участникам Полдня.", show_alert=True)
+        await callback.answer("Торговец Локи доступен только участникам Полдня.", show_alert=True)
         return
     data = await state.get_data()
     items_data = data.get("market_items", [])
@@ -921,7 +921,7 @@ async def market_submit(callback: CallbackQuery, db: Database, state: FSMContext
         f"Способ: {method_label}\n\n" + market_order_text(order, order_items)
     )
 
-    topic = await db.get_market_topic()
+    topic = await db.get_topic('trader')
     if topic:
         try:
             await bot.send_message(
@@ -954,17 +954,17 @@ async def admin_market(callback: CallbackQuery, db: Database, config: Config, te
         await callback.answer("Недостаточно прав", show_alert=True)
         return
     target = await db.get_market_merchant_target()
-    topic = await db.get_market_topic()
+    topic = await db.get_topic('trader')
     connected = await telethon.is_connected()
     text = (
-        "<b>🛒 Настройки Рынка ГП</b>\n\n"
+        "<b>🛒 Настройки Торговца Локи</b>\n\n"
         f"👤 Торговец: <code>{escape(target) if target else 'не настроен'}</code>\n"
         f"🔐 Telethon: {'🟢 подключён' if connected else '🔴 не подключён'}\n"
-        f"💬 Тема Рынок ГП: {'✅ настроена' if topic else '⚠️ не настроена'}\n\n"
+        f"💬 Тема Торговец Локи: {'✅ настроена' if topic else '⚠️ не настроена'}\n\n"
         "Получатель может быть числовым Telegram ID или @username.\n"
         "• ID: бот сначала попробует написать сам; если нельзя — использует Telethon.\n"
         "• @username: используется Telethon.\n\n"
-        "Чтобы привязать тему, отправьте /set_market_topic прямо внутри темы «Рынок ГП»."
+        "Чтобы привязать тему, отправьте /set_trader_topic прямо внутри темы «Торговец Локи»."
     )
     await callback.message.edit_text(text, reply_markup=market_settings_keyboard(bool(target), connected))
     await callback.answer()
@@ -976,7 +976,7 @@ async def market_merchant_start(callback: CallbackQuery, state: FSMContext, conf
     if not is_admin(callback.from_user.id, config):
         await callback.answer("Недостаточно прав", show_alert=True)
         return
-    await callback.answer("Торговец настраивается в группе: /admin → Рынок ГП или ответом /set_gp_merchant на его сообщение.", show_alert=True)
+    await callback.answer("Торговец настраивается в группе: /admin → Торговец Локи или ответом /set_gp_merchant на его сообщение.", show_alert=True)
 
 
 @router.message(MarketSettings.merchant_target)
@@ -1010,7 +1010,7 @@ async def market_test(callback: CallbackQuery, db: Database, config: Config, bot
             bot,
             telethon,
             target,
-            "🧪 <b>Тест связи XZONA Group Bot</b>\n\nЕсли вы получили это сообщение, доставка заказов Рынка ГП настроена правильно.",
+            "🧪 <b>Тест связи XZONA Group Bot</b>\n\nЕсли вы получили это сообщение, доставка заказов Торговца Локи настроена правильно.",
         )
     except Exception as exc:
         await topic_answer(callback.message, f"❌ Тест не прошёл: <code>{escape(str(exc)[:700])}</code>")
@@ -1382,7 +1382,7 @@ async def help_message(message: Message, config: Config):
         "<b>🎮 XZONA Group Bot</b>\n\n"
         "👤 Игрок: регистрация игрового ника и просмотр своих предметов.\n"
         "📦 Хранилище: учёт вещей, принятых на хранение.\n"
-        "🛒 Рынок ГП: формирование заказа и отправка Торговцу ГП.\n"
+        "🛒 Торговец Локи: формирование заказа и отправка Торговцу ГП.\n"
         "👥 Ники автоматически берутся из настроенной темы Telegram.\n"
         "🔐 Старые ники можно импортировать через Telethon прямо из админ-меню."
     )

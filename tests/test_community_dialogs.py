@@ -4,6 +4,7 @@ import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.session.base import BaseSession
@@ -49,6 +50,10 @@ class DialogTests(unittest.IsolatedAsyncioTestCase):
     def setUpClass(cls):
         cls.dp=Dispatcher(fsm_strategy=FSMStrategy.USER_IN_TOPIC,events_isolation=SimpleEventIsolation())
         cls.dp.include_router(router)
+        from app.group_handlers import router as group_router
+        from app.multitask_handlers import router as multi_router
+        cls.dp.include_router(group_router)
+        cls.dp.include_router(multi_router)
 
     async def asyncSetUp(self):
         self.tmp=tempfile.TemporaryDirectory()
@@ -58,6 +63,7 @@ class DialogTests(unittest.IsolatedAsyncioTestCase):
         self.bot=Bot('123456:FAKE_TEST_TOKEN_NOT_FOR_NETWORK',session=self.session)
         self.config=SimpleNamespace(admin_ids=set(),temp_message_ttl=90)
         self.dp['db']=self.db; self.dp['config']=self.config
+        self.dp['telethon']=SimpleNamespace(is_connected=AsyncMock(return_value=False))
         self.dp.fsm.storage=MemoryStorage()
         self.dp.fsm.events_isolation=SimpleEventIsolation()
         self.n=0
@@ -175,6 +181,66 @@ class DialogTests(unittest.IsolatedAsyncioTestCase):
         next_page=self.latest_button('c8:catalog:request:1')
         await self.event(data=next_page,topic=40)
         self.assertEqual(self.latest_button('c8:catalog:request:0'),'c8:catalog:request:0')
+
+    async def test_trader_order_separate_from_ads_and_warehouse(self):
+        await self.db.set_topic('trader',-1001,50)
+        await self.db.set_topic('delivery',-1001,60)
+        await self.db.set_market_merchant_target('6')
+        await self.event(data='gmarket:new',topic=20)
+        self.assertTrue(self.session.calls[-1].show_alert)
+        await self.event(data='c8:catalog:sale:0',topic=50)
+        self.assertTrue(self.session.calls[-1].show_alert)
+        await self.event(data='gmarket:new',topic=50)
+        await self.event(text='Новый товар у Локи',topic=50)
+        await self.event(text='2',topic=50)
+        with patch('app.group_handlers.send_merchant_notification',AsyncMock(return_value=('bot',999))):
+            await self.event(data='gmarket:submit',topic=50)
+            await self.event(data='gmarket:submit',topic=50)
+        orders=await self.db.list_market_orders()
+        self.assertEqual(len(orders),1)
+        self.assertEqual(orders[0].topic_thread_id,50)
+        self.assertEqual(await self.db.ad_list(),[])
+        for status in ('accepted','assembled','issued'):
+            await self.event(data=f'gorder:{status}:{orders[0].id}',topic=50,uid=6)
+        self.assertEqual((await self.db.get_market_order(orders[0].id))[0].workflow_status,'issued')
+        cat=await self.db.catalogue_get(self.cat['id'])
+        self.assertEqual((cat['quantity'],cat['reserved']),(10,0))
+        ready=[m for m in self.session.calls if m.__api_method__=='sendMessage' and m.message_thread_id==60]
+        self.assertEqual(len(ready),1)
+        self.assertIn('Торговец Локи',ready[0].text)
+        self.assertIn('tg://user?id=4',ready[0].text)
+
+    async def test_ready_notification_retries_without_duplicates(self):
+        from app.community_publish import publish_community
+        await self.db.set_topic('delivery',-1001,60)
+        order=await self.db.create_market_order(requester_id=4,items=[('Товар',1)],comment=None,merchant_target='6')
+        await publish_community(self.bot,self.db)
+        self.assertIsNone(await self.db.get_market_delivery_ref(order))
+        await self.db.advance_order(order,'accepted',6)
+        await self.db.advance_order(order,'assembled',6)
+        with patch.object(self.session,'make_request',AsyncMock(side_effect=RuntimeError('offline'))):
+            await publish_community(self.bot,self.db)
+        self.assertIsNone(await self.db.get_market_delivery_ref(order))
+        await publish_community(self.bot,self.db)
+        await publish_community(self.bot,self.db)
+        ready=[m for m in self.session.calls if m.__api_method__=='sendMessage' and m.message_thread_id==60]
+        self.assertEqual(len(ready),1)
+
+    async def test_trader_delivery_and_old_order_reserves(self):
+        new=await self.db.create_market_order(requester_id=4,items=[('Аптечка',2)],comment=None,merchant_target='1')
+        await self.db.advance_order(new,'accepted',1)
+        await self.db.advance_order(new,'assembled',1)
+        await self.event(data=f'v7delivery:issue:{new}',topic=60,uid=1)
+        self.assertEqual((await self.db.get_market_order(new))[0].workflow_status,'issued')
+        self.assertEqual((await self.db.catalogue_get(self.cat['id']))['quantity'],10)
+        old=await self.db.create_market_order(requester_id=4,items=[('Аптечка',2)],comment=None,merchant_target='1',source='gp_stock')
+        await self.db.advance_order(old,'accepted',1)
+        self.assertEqual((await self.db.catalogue_get(self.cat['id']))['reserved'],2)
+        await self.db.advance_order(old,'assembled',1)
+        await self.db.advance_order(old,'issued',1)
+        with self.assertRaises(ValueError):
+            await self.db.advance_order(old,'issued',1)
+        self.assertEqual((await self.db.catalogue_get(self.cat['id']))['quantity'],8)
 
 
 if __name__=='__main__':

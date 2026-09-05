@@ -78,6 +78,15 @@ async def publish_community(bot, db):
         text += '\n'.join(f'<b>{escape(r["target_name"])}</b> — {escape(r["reason"])}' for r in targets) or 'Активных целей из дипломатии нет.'
         text += '\n\nОбновляется по дипломатии. Враг союзника появляется только после решения Дипломата.'
         await publish('faction_targets',target_topic,text)
+    # Recover a readiness notification after a restart/network failure, or when
+    # the ready-orders topic is configured after the merchant assembled an order.
+    if await db.get_topic('delivery'):
+        from .multitask_handlers import publish_delivery_card
+        for r in await db.community_rows("SELECT id FROM market_orders WHERE workflow_status='assembled' ORDER BY id"):
+            try:
+                await publish_delivery_card(bot,db,r['id'])
+            except Exception as exc:
+                log.warning('Ready order %s failed: %s',r['id'],type(exc).__name__)
 
 
 async def community_publish_loop(bot, db):

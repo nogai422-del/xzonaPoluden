@@ -1140,6 +1140,7 @@ class Database(CommunityDatabase):
         items: list[tuple[str, int]],
         comment: str | None,
         merchant_target: str | None,
+        source: str = 'trader',
     ) -> int:
         items = [((await self.catalogue_save(name))['name'],qty) for name,qty in items]
         now = utc_now()
@@ -1153,6 +1154,8 @@ class Database(CommunityDatabase):
                 (requester_id, comment.strip() if comment else None, merchant_target, now),
             )
             order_id = int(cur.lastrowid)
+            if source == 'trader':
+                await db.execute('INSERT INTO trader_orders(order_id) VALUES(?)', (order_id,))
             await db.executemany(
                 "INSERT INTO market_order_items(order_id, item_name, quantity) VALUES(?,?,?)",
                 [(order_id, name.strip(), qty) for name, qty in items],
@@ -1315,7 +1318,7 @@ class Database(CommunityDatabase):
             return None
 
     async def list_topics(self) -> dict[str, tuple[int, int]]:
-        codes = ("general","nicks","storage","market","delivery","gp_stock","events","diplomacy","targets","news","info","bar")
+        codes = ("general","nicks","storage","market","trader","delivery","gp_stock","events","diplomacy","targets","news","info","bar")
         result = {}
         for code in codes:
             topic = await self.get_topic(code)

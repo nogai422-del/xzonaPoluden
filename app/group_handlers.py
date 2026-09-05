@@ -512,6 +512,9 @@ async def set_market_topic_group(message: Message, db: Database, config: Config)
         await temp_answer(message, "Отправьте /set_market_topic прямо внутри темы «Рынок ГП».", ttl=90)
         return
     from .multitask_handlers import remove_old_topic_panel
+    if topic == await db.get_topic('trader'):
+        await temp_answer(message, 'Рынок ГП и Торговец Локи должны быть в разных темах.', ttl=60)
+        return
     await remove_old_topic_panel(message.bot, db, "market", topic[0], topic[1])
     await db.set_market_topic(*topic)
     await db.set_topic("market", *topic)
@@ -1403,8 +1406,8 @@ async def group_storage_list(callback: CallbackQuery, db: Database, config: Conf
 async def group_market_new(callback: CallbackQuery, db: Database, state: FSMContext, config: Config):
     if not await require_permission_callback(callback, "market.create", db, config, "Заказы ГП доступны только участникам Полдня."):
         return
-    topic = await db.get_market_topic()
-    if not await require_configured_topic(callback, topic, "Рынок ГП"):
+    topic = await db.get_topic('trader')
+    if not await require_configured_topic(callback, topic, "Торговец Локи"):
         return
     player = await db.get_player(callback.from_user.id)
     if not player:
@@ -1431,14 +1434,15 @@ async def group_market_new(callback: CallbackQuery, db: Database, state: FSMCont
 
 
 @router.message(GroupMarketOrder.item_name, F.chat.type.in_(GROUP_TYPES), ~F.text.startswith("/"))
-async def group_market_item_name(message: Message, state: FSMContext):
+async def group_market_item_name(message: Message, state: FSMContext, db: Database):
     if not await flow_matches_message(message, state):
-        await temp_answer(message, "Продолжите оформление заказа в теме Рынок ГП.", ttl=60)
+        await temp_answer(message, "Продолжите оформление заказа в теме Торговец Локи.", ttl=60)
         return
     name = (message.text or "").strip()
     if not 1 <= len(name) <= 80:
         await temp_answer(message, "Название должно быть от 1 до 80 символов.", ttl=60)
         return
+    name = (await db.catalogue_save(name))["name"]
     await state.update_data(market_pending_name=name)
     await state.set_state(GroupMarketOrder.quantity)
     await safe_delete(message)
@@ -1480,7 +1484,7 @@ async def group_market_qty_button(callback: CallbackQuery, state: FSMContext):
 @router.message(GroupMarketOrder.quantity, F.chat.type.in_(GROUP_TYPES), ~F.text.startswith("/"))
 async def group_market_qty_text(message: Message, state: FSMContext):
     if not await flow_matches_message(message, state):
-        await temp_answer(message, "Продолжите оформление заказа в теме Рынок ГП.", ttl=60)
+        await temp_answer(message, "Продолжите оформление заказа в теме Торговец Локи.", ttl=60)
         return
     raw = (message.text or "").strip()
     if not raw.isdigit() or not 1 <= int(raw) <= 9999:
@@ -1500,6 +1504,8 @@ async def group_market_add_more(callback: CallbackQuery, state: FSMContext):
     if not await flow_matches_callback(callback, state):
         await callback.answer("Сессия заказа устарела. Начните новый заказ.", show_alert=True)
         return
+    if len((await state.get_data()).get('market_items', [])) >= 20:
+        return await callback.answer('В одном заказе максимум 20 позиций.', show_alert=True)
     await state.set_state(GroupMarketOrder.item_name)
     await callback.message.edit_text(
         "🎒 Напишите название следующей позиции:",
@@ -1521,7 +1527,7 @@ async def group_market_comment_start(callback: CallbackQuery, state: FSMContext)
 @router.message(GroupMarketOrder.comment, F.chat.type.in_(GROUP_TYPES), ~F.text.startswith("/"))
 async def group_market_comment_text(message: Message, state: FSMContext):
     if not await flow_matches_message(message, state):
-        await temp_answer(message, "Продолжите оформление заказа в теме Рынок ГП.", ttl=60)
+        await temp_answer(message, "Продолжите оформление заказа в теме Торговец Локи.", ttl=60)
         return
     comment = (message.text or "").strip()
     if len(comment) > 500:
@@ -1557,8 +1563,8 @@ async def group_market_submit(
 ):
     if not await require_permission_callback(callback, "market.create", db, config, "Заказы ГП доступны только участникам Полдня."):
         return
-    topic = await db.get_market_topic()
-    if not await require_configured_topic(callback, topic, "Рынок ГП"):
+    topic = await db.get_topic('trader')
+    if not await require_configured_topic(callback, topic, "Торговец Локи"):
         return
     if not await flow_matches_callback(callback, state):
         await callback.answer("Сессия заказа устарела. Начните новый заказ.", show_alert=True)
@@ -1583,6 +1589,7 @@ async def group_market_submit(
         comment=data.get("market_comment"),
         merchant_target=target,
     )
+    await state.clear()
     await db.set_market_order_topic_message(
         order_id,
         callback.message.chat.id,
@@ -1627,8 +1634,8 @@ async def group_market_submit(
 async def group_market_mine(callback: CallbackQuery, db: Database, config: Config):
     if not await require_permission_callback(callback, "market.create", db, config, "Заказы ГП доступны только участникам Полдня."):
         return
-    topic = await db.get_market_topic()
-    if not await require_configured_topic(callback, topic, "Рынок ГП"):
+    topic = await db.get_topic('trader')
+    if not await require_configured_topic(callback, topic, "Торговец Локи"):
         return
     orders = await db.list_market_orders(requester_id=callback.from_user.id, limit=10)
     if not orders:
@@ -1637,7 +1644,36 @@ async def group_market_mine(callback: CallbackQuery, db: Database, config: Confi
     lines = ["<b>📋 Мои последние заказы</b>", ""]
     for order in orders:
         lines.append(f"{WORKFLOW_LABELS.get(order.workflow_status, '•')} <b>#{order.id}</b> — {fmt_dt(order.created_at)}")
-    await temp_callback_message(callback, "\n".join(lines), ttl=config.temp_message_ttl)
+    buttons = [[InlineKeyboardButton(text=f'Заказ #{order.id}',callback_data=f'gmarket:view:{order.id}')] for order in orders]
+    await temp_callback_message(callback, "\n".join(lines), ttl=config.temp_message_ttl,reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+    await callback.answer()
+
+
+@router.callback_query(F.data == 'gmarket:queue')
+async def trader_queue(callback: CallbackQuery, db: Database, config: Config):
+    if not await require_configured_topic(callback,await db.get_topic('trader'),'Торговец Локи'):
+        return
+    target = await db.get_market_merchant_target()
+    if not await merchant_authorized(callback.from_user.id,callback.from_user.username,target,db,config):
+        return await callback.answer('Очередь доступна торговцу и руководству.',show_alert=True)
+    rows = await db.community_rows("SELECT id FROM market_orders WHERE workflow_status IN ('pending','accepted','assembled') ORDER BY id LIMIT 30")
+    buttons = [[InlineKeyboardButton(text=f'Заказ #{r["id"]}',callback_data=f'gmarket:view:{r["id"]}')] for r in rows]
+    await temp_callback_message(callback,'<b>📋 Очередь торговца — первые 30 активных заказов</b>' if rows else 'Активных заказов нет.',reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),ttl=300)
+    await callback.answer()
+
+
+@router.callback_query(F.data.regexp(r'^gmarket:view:\d+$'))
+async def trader_order_view(callback: CallbackQuery, db: Database, config: Config):
+    if not await require_configured_topic(callback,await db.get_topic('trader'),'Торговец Локи'):
+        return
+    loaded = await db.get_market_order(int(callback.data.rsplit(':',1)[1]))
+    if not loaded:
+        return await callback.answer('Заказ не найден.',show_alert=True)
+    order,items = loaded
+    manage = await merchant_authorized(callback.from_user.id,callback.from_user.username,order.merchant_target,db,config)
+    if callback.from_user.id != order.requester_id and not manage:
+        return await callback.answer('Это чужой заказ.',show_alert=True)
+    await temp_callback_message(callback,market_order_group_text(order,items),reply_markup=market_order_status_keyboard(order.id,order.workflow_status) if manage else None,ttl=300)
     await callback.answer()
 
 
@@ -1681,15 +1717,15 @@ async def group_admin_market(callback: CallbackQuery, db: Database, config: Conf
         await callback.answer("Недостаточно прав", show_alert=True)
         return
     target = await db.get_market_merchant_target()
-    topic = await db.get_market_topic()
+    topic = await db.get_topic('trader')
     connected = await telethon.is_connected()
     await callback.message.edit_text(
-        "<b>🛒 Настройки Рынка ГП</b>\n\n"
+        "<b>🛒 Торговец Локи — настройки заказов</b>\n\n"
         f"Тема: {'✅ настроена' if topic else '⚠️ не настроена'}\n"
         f"Торговец: <code>{escape(target) if target else 'не назначен'}</code>\n"
         f"Telethon: {'🟢 подключён' if connected else '🔴 не подключён'}\n\n"
         "Проще всего назначить Торговца: ответьте на его сообщение командой <code>/set_gp_merchant</code>.\n"
-        "Для привязки темы отправьте <code>/set_market_topic</code> внутри «Рынок ГП».",
+        "Для привязки темы отправьте <code>/set_trader_topic</code> внутри «Торговец Локи».",
         reply_markup=group_market_admin_menu(bool(target)),
     )
     await callback.answer()
@@ -1748,11 +1784,11 @@ async def group_market_test(callback: CallbackQuery, db: Database, config: Confi
             bot,
             telethon,
             target,
-            "🧪 <b>Тест связи XZONA Group Bot</b>\n\nДоставка заказов Рынка ГП настроена.",
+            "🧪 <b>Тест связи XZONA Group Bot</b>\n\nДоставка заказов Торговца Локи настроена.",
         )
         await temp_callback_message(callback, f"✅ Тест доставлен через {'Telegram Bot' if method == 'bot' else 'Telethon'}.", ttl=60)
     except Exception as exc:
-        await temp_callback_message(callback, f"⚠️ Личная доставка не прошла: <code>{escape(str(exc)[:500])}</code>\nЗаказы всё равно будут видны в теме Рынок ГП.", ttl=120)
+        await temp_callback_message(callback, f"⚠️ Личная доставка не прошла: <code>{escape(str(exc)[:500])}</code>\nЗаказы всё равно будут видны в теме Торговец Локи.", ttl=120)
 
 
 ALLOWED_TRANSITIONS = {
@@ -1804,37 +1840,11 @@ async def group_order_status(callback: CallbackQuery, db: Database, config: Conf
     if new_status not in ALLOWED_TRANSITIONS.get(order.workflow_status, set()):
         await callback.answer("Этот переход статуса уже недоступен.", show_alert=True)
         return
-    stock_items = [(x.item_name, x.quantity) for x in items]
-    shortages: list[tuple[str, int, int]] = []
-    if new_status == "accepted":
-        ok, shortages = await db.gp_stock_reserve(stock_items, callback.from_user.id)
-        if not ok:
-            lines = ["⚠️ Заказ не принят: на складе ГП недостаточно свободного остатка:"] + [
-                f"• {name}: нужно {need}, доступно {have}" for name, need, have in shortages
-            ]
-            try:
-                from .housekeeping import temp_callback_message
-                await temp_callback_message(callback, "\n".join(lines), ttl=120)
-            except Exception:
-                pass
-            await callback.answer("Недостаточно свободного остатка", show_alert=True)
-            return
-    elif new_status == "rejected" and order.workflow_status == "accepted":
-        await db.gp_stock_release(stock_items, callback.from_user.id)
-    elif new_status == "issued":
-        ok, shortages = await db.gp_stock_consume_reserved(stock_items, callback.from_user.id)
-        if not ok:
-            lines = ["⚠️ Выдача не закрыта: резерв склада повреждён или недостаточен:"] + [
-                f"• {name}: нужно {need}, в резерве {have}" for name, need, have in shortages
-            ]
-            try:
-                from .housekeeping import temp_callback_message
-                await temp_callback_message(callback, "\n".join(lines), ttl=120)
-            except Exception:
-                pass
-            await callback.answer("Проверьте склад ГП", show_alert=True)
-            return
-    await db.set_market_workflow_status(order_id, new_status)
+    try:
+        await db.advance_order(order_id, new_status, callback.from_user.id)
+    except ValueError as exc:
+        await callback.answer(str(exc)[:190], show_alert=True)
+        return
     loaded = await db.get_market_order(order_id)
     order, items = loaded
     await refresh_order_cards(bot, order, items)

@@ -114,7 +114,7 @@ async def choose_item(cb, state, db, config, kind, item_id):
         await start_flow(cb,state,'sale_photo',f"<b>{escape(cat['name'])}</b>\nПрикрепите одну фотографию предмета как фото (не файл).",item_id=item_id)
 
 
-@router.callback_query(F.data.in_({'gstorage:list','gmarket:new','gmarket:mine','v7dip:list','v7dip:new','v7stock:list','v7stock:set'}))
+@router.callback_query(F.data.in_({'gstorage:list','v7dip:list','v7dip:new','v7stock:list','v7stock:set'}))
 async def legacy_entry(cb:CallbackQuery,db,config,state:FSMContext):
     if cb.data=='gstorage:list':
         personal = await db.get_topic('storage')
@@ -125,10 +125,6 @@ async def legacy_entry(cb:CallbackQuery,db,config,state:FSMContext):
         await in_topic(cb.message,db,'storage')
         await internal(cb.from_user.id,db)
         await topic_answer(cb.message,'<b>📦 Склад группировки</b>',reply_markup=storage_panel())
-    elif cb.data.startswith('gmarket:'):
-        await in_topic(cb.message,db,'market')
-        await internal(cb.from_user.id,db)
-        await topic_answer(cb.message,'<b>🪧 Рынок ГП — объявления о продаже</b>',reply_markup=market_panel())
     elif cb.data.startswith('v7dip:'):
         await in_topic(cb.message,db,'diplomacy')
         await internal(cb.from_user.id,db)
@@ -145,11 +141,6 @@ async def legacy_entry(cb:CallbackQuery,db,config,state:FSMContext):
 @router.callback_query(F.data.startswith('v7dip:'))
 async def outdated_diplomacy(cb:CallbackQuery):
     await cb.answer('Эта карточка устарела. Откройте таблицу отношений в новой панели Дипломатии.',show_alert=True)
-
-
-@router.callback_query(F.data.in_({'gmarket:add_more','gmarket:comment','gmarket:comment_skip','gmarket:submit'}))
-async def outdated_market(cb:CallbackQuery):
-    await cb.answer('Рынок теперь работает как доска объявлений. Нажмите «Создать объявление» в панели темы.',show_alert=True)
 
 
 @router.callback_query(F.data.startswith('c8:'))
