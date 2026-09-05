@@ -59,11 +59,56 @@ async def in_topic(message, db, code):
 
 
 async def start_flow(cb, state, kind, prompt, **data):
+    # If an earlier input flow was abandoned, remove its working prompt before
+    # starting a new one. This prevents stale "Cancel" cards from piling up.
+    previous = await state.get_data()
+    old_prompt_id = previous.get('prompt_id')
+    if old_prompt_id and old_prompt_id != cb.message.message_id:
+        try:
+            await cb.bot.delete_message(cb.message.chat.id, old_prompt_id)
+        except Exception:
+            pass
     await state.clear()
     sent = await _screen_text(cb, prompt, keyboard([('❌ Отмена','c8:cancel')]))
     await state.set_state(Flow.value)
     await state.update_data(kind=kind,nonce=uuid4().hex,chat=sent.chat.id,
                             thread=int(sent.message_thread_id or 0),prompt_id=sent.message_id,**data)
+
+
+async def _flow_screen(message: Message, state: FSMContext, text: str, reply_markup=None, *, prompt_id=None) -> Message:
+    """Update the single working flow message, never leave a failed edit behind."""
+    data = await state.get_data()
+    prompt_id = prompt_id or data.get('prompt_id')
+    if prompt_id:
+        try:
+            await message.bot.edit_message_text(text, message.chat.id, prompt_id, reply_markup=reply_markup)
+            # aiogram does not return a Message from Bot.edit_message_text in every case;
+            # the id is already known and remains our active screen.
+            return message
+        except Exception:
+            # Important: if Telegram refuses to edit (media/text mismatch, stale
+            # markup, etc.), delete that old bot prompt BEFORE sending replacement.
+            try:
+                await message.bot.delete_message(message.chat.id, prompt_id)
+            except Exception:
+                pass
+    sent = await topic_answer(message, text, reply_markup=reply_markup)
+    if await state.get_state():
+        await state.update_data(prompt_id=sent.message_id)
+    return sent
+
+
+def _warehouse_manage_markup():
+    return keyboard(
+        [('📥 Приём', 'c8:wh:receivepick:0'), ('📤 Выдача', 'c8:wh:issuepick:0')],
+        [('➕ Новый предмет', 'c8:wh:newitemcats'), ('📁 Разделы', 'c8:wh:categories')],
+        [('📋 Очередь заявок', 'c8:requests:all:0'), ('📜 Журнал', 'c8:wh:history:0')],
+        _warehouse_nav(),
+    )
+
+
+def _warehouse_manage_text():
+    return '<b>🛠 Раздел кладовщика</b>\n\nПриём и выдача сразу меняют остаток и фиксируются в журнале.'
 
 
 async def show_catalog(cb, db, config, kind, page=0, search='', archived=False):
@@ -222,13 +267,7 @@ async def show_warehouse_item(cb: CallbackQuery, db, config, item_id: int, categ
 async def show_warehouse_manage(cb: CallbackQuery, db, config):
     await in_topic(cb.message, db, 'storage')
     await permission(cb.from_user.id, 'storage.manage', db, config)
-    buttons = [
-        [('📥 Приём', 'c8:wh:receivepick:0'), ('📤 Выдача', 'c8:wh:issuepick:0')],
-        [('➕ Новый предмет', 'c8:wh:newitemcats'), ('📁 Разделы', 'c8:wh:categories')],
-        [('📋 Очередь заявок', 'c8:requests:all:0'), ('📜 Журнал', 'c8:wh:history:0')],
-        _warehouse_nav(),
-    ]
-    await _screen_text(cb, '<b>🛠 Раздел кладовщика</b>\n\nПриём и выдача сразу меняют остаток и фиксируются в журнале.', keyboard(*buttons))
+    await _screen_text(cb, _warehouse_manage_text(), _warehouse_manage_markup())
 
 
 @router.callback_query(F.data.in_({'gstorage:list','v7dip:list','v7dip:new','v7stock:list','v7stock:set'}))
@@ -276,7 +315,14 @@ async def community_callback(cb:CallbackQuery,db,config,state:FSMContext):
                 pass
         return_to=d.get('return_to','c8:wh:home')
         await state.clear()
-        await _screen_text(cb,'Ввод отменён.',keyboard([('⬅️ Назад',return_to),('🏠 Склад','c8:wh:home')]))
+        # Cancellation is navigation, not a new status card. Return directly to
+        # a working screen so the topic still contains only one bot interface.
+        if return_to == 'c8:wh:manage':
+            await show_warehouse_manage(cb,db,config)
+        elif return_to == 'c8:wh:home':
+            await show_warehouse(cb,db,config)
+        else:
+            await _screen_text(cb,'Ввод отменён.',keyboard([('⬅️ Назад',return_to),('🏠 Склад','c8:wh:home')]))
         return await cb.answer()
     if action=='wh':
         sub = parts[2] if len(parts) > 2 else 'home'
@@ -727,13 +773,11 @@ async def flow_value(message:Message,state:FSMContext,db,config):
         schedule_delete(message.bot,preview.chat.id,preview.message_id,600)
     elif prompt:
         current = await state.get_state()
-        d2 = await state.get_data() if current else d
-        markup = keyboard([('❌ Отмена','c8:cancel')]) if current else keyboard([('⬅️ Назад', d.get('return_to','c8:wh:manage')),('🏠 Склад','c8:wh:home')])
-        prompt_id = d.get('prompt_id')
-        if prompt_id:
-            try:
-                await message.bot.edit_message_text(prompt, message.chat.id, prompt_id, reply_markup=markup)
-            except Exception:
-                await topic_answer(message,prompt,reply_markup=markup)
+        if kind.startswith('wh_') and not current:
+            # A completed warehouse action returns straight to the live
+            # quartermaster menu. Do not leave a separate success message.
+            prompt = _warehouse_manage_text()
+            markup = _warehouse_manage_markup()
         else:
-            await topic_answer(message,prompt,reply_markup=markup)
+            markup = keyboard([('❌ Отмена','c8:cancel')]) if current else keyboard([('⬅️ Назад', d.get('return_to','c8:wh:manage')),('🏠 Склад','c8:wh:home')])
+        await _flow_screen(message, state, prompt, markup, prompt_id=d.get('prompt_id'))
